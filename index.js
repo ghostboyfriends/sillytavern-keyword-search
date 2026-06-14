@@ -255,41 +255,36 @@ function esc(s) {
     return `${s}`.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
-const MODAL_HTML = `
-<div id="kwsearch-modal" class="kwsearch-modal" style="display:none;">
-  <div class="kwsearch-box">
-    <div class="kwsearch-head">
-      <span><i class="fa-solid fa-magnifying-glass"></i> 关键词搜索</span>
-      <i class="fa-solid fa-xmark kwsearch-close" title="关闭"></i>
-    </div>
-    <div class="kwsearch-controls">
-      <input id="kwsearch-input" type="text" class="text_pole" placeholder="输入关键词，例如：女性向" />
-      <div class="kwsearch-scopes">
-        <label><input type="checkbox" data-scope="preset" checked> 当前预设</label>
-        <label><input type="checkbox" data-scope="world" checked> 世界书</label>
-        <label><input type="checkbox" data-scope="char"> 当前角色卡</label>
-        <label><input type="checkbox" data-scope="chat"> 当前聊天</label>
-      </div>
-      <div class="kwsearch-scopes kwsearch-global">
-        <span class="kwsearch-scope-tag">全局</span>
-        <label><input type="checkbox" data-scope="charAll"> 全部角色卡</label>
-        <label><input type="checkbox" data-scope="chatAll"> 全部聊天</label>
-        <span class="kwsearch-hint">需扫描磁盘，较慢</span>
-      </div>
-      <div class="kwsearch-opts">
-        <label><input type="checkbox" id="kwsearch-case"> 区分大小写</label>
-        <label><input type="checkbox" id="kwsearch-regex"> 正则模式</label>
-        <button id="kwsearch-go" class="menu_button">搜索</button>
-      </div>
-    </div>
-    <div id="kwsearch-summary" class="kwsearch-summary"></div>
-    <div id="kwsearch-results" class="kwsearch-results"></div>
+/* ---------- UI（使用酒馆原生弹窗渲染，移动端更稳） ---------- */
+
+const PANEL_HTML = `
+<div class="kwsearch-panel">
+  <div class="kwsearch-title"><i class="fa-solid fa-magnifying-glass"></i> 关键词搜索</div>
+  <input type="text" class="text_pole kws-input" placeholder="输入关键词，例如：女性向" />
+  <div class="kwsearch-scopes">
+    <label><input type="checkbox" data-scope="preset" checked> 当前预设</label>
+    <label><input type="checkbox" data-scope="world" checked> 世界书</label>
+    <label><input type="checkbox" data-scope="char"> 当前角色卡</label>
+    <label><input type="checkbox" data-scope="chat"> 当前聊天</label>
   </div>
+  <div class="kwsearch-scopes kwsearch-global">
+    <span class="kwsearch-scope-tag">全局</span>
+    <label><input type="checkbox" data-scope="charAll"> 全部角色卡</label>
+    <label><input type="checkbox" data-scope="chatAll"> 全部聊天</label>
+    <span class="kwsearch-hint">需扫描磁盘，较慢</span>
+  </div>
+  <div class="kwsearch-opts">
+    <label><input type="checkbox" class="kws-case"> 区分大小写</label>
+    <label><input type="checkbox" class="kws-regex"> 正则模式</label>
+    <button class="menu_button kws-go">搜索</button>
+  </div>
+  <div class="kwsearch-summary"></div>
+  <div class="kwsearch-results"></div>
 </div>`;
 
-function renderResults(groups, query) {
-    const summary = document.getElementById('kwsearch-summary');
-    const box = document.getElementById('kwsearch-results');
+function renderResults(panel, groups, query) {
+    const summary = panel.querySelector('.kwsearch-summary');
+    const box = panel.querySelector('.kwsearch-results');
     const grand = groups.reduce((a, g) => a + g.total, 0);
     const hits = groups.reduce((a, g) => a + g.results.length, 0);
     summary.innerHTML = `关键词 “<b>${esc(query)}</b>” 共出现 <b>${grand}</b> 次，分布在 <b>${hits}</b> 个条目中。`;
@@ -324,28 +319,28 @@ function renderResults(groups, query) {
 
 let kwSearching = false;
 
-async function doSearch() {
+async function doSearch(panel) {
     if (kwSearching) return;
-    const query = document.getElementById('kwsearch-input').value.trim();
+    const query = panel.querySelector('.kws-input').value.trim();
     if (!query) return;
 
     const scopes = {};
-    document.querySelectorAll('#kwsearch-modal [data-scope]').forEach(cb => { scopes[cb.dataset.scope] = cb.checked; });
+    panel.querySelectorAll('[data-scope]').forEach(cb => { scopes[cb.dataset.scope] = cb.checked; });
     const opts = {
-        caseSensitive: document.getElementById('kwsearch-case').checked,
-        regex: document.getElementById('kwsearch-regex').checked,
+        caseSensitive: panel.querySelector('.kws-case').checked,
+        regex: panel.querySelector('.kws-regex').checked,
     };
 
-    const summary = document.getElementById('kwsearch-summary');
-    const goBtn = document.getElementById('kwsearch-go');
-    document.getElementById('kwsearch-results').innerHTML = '';
+    const summary = panel.querySelector('.kwsearch-summary');
+    const goBtn = panel.querySelector('.kws-go');
+    panel.querySelector('.kwsearch-results').innerHTML = '';
     summary.textContent = '搜索中…';
     kwSearching = true;
     goBtn.disabled = true;
     try {
         const onProgress = (stage) => { summary.textContent = `搜索中… ${stage}`; };
         const groups = await runSearch(query, scopes, opts, onProgress);
-        renderResults(groups, query);
+        renderResults(panel, groups, query);
     } catch (e) {
         summary.innerHTML = `<span class="kwsearch-error">${esc(e.message)}</span>`;
     } finally {
@@ -354,28 +349,50 @@ async function doSearch() {
     }
 }
 
-function openModal(prefill) {
-    const modal = document.getElementById('kwsearch-modal');
-    if (!modal) return;
-    modal.style.display = 'flex';
-    const input = document.getElementById('kwsearch-input');
+function buildPanel(prefill) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = PANEL_HTML.trim();
+    const panel = tmp.firstElementChild;
+    const input = panel.querySelector('.kws-input');
+    panel.querySelector('.kws-go').addEventListener('click', () => doSearch(panel));
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSearch(panel); } });
     if (prefill) input.value = prefill;
-    input.focus();
-    input.select();
-    if (prefill) doSearch();
+    return panel;
 }
 
-function injectModal() {
-    if (document.getElementById('kwsearch-modal')) return;
-    const tmp = document.createElement('div');
-    tmp.innerHTML = MODAL_HTML.trim();
-    document.body.appendChild(tmp.firstElementChild);
+// 兜底浮层（仅当酒馆没有原生弹窗 API 时使用）
+function showFallback(panel) {
+    const overlay = document.createElement('div');
+    overlay.className = 'kwsearch-modal';
+    overlay.style.display = 'flex';
+    const box = document.createElement('div');
+    box.className = 'kwsearch-box';
+    box.appendChild(panel);
+    overlay.appendChild(box);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+}
 
-    const modal = document.getElementById('kwsearch-modal');
-    modal.querySelector('.kwsearch-close').addEventListener('click', () => { modal.style.display = 'none'; });
-    modal.addEventListener('mousedown', (e) => { if (e.target === modal) modal.style.display = 'none'; });
-    document.getElementById('kwsearch-go').addEventListener('click', doSearch);
-    document.getElementById('kwsearch-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+async function openModal(prefill) {
+    const c = ctx();
+    const panel = buildPanel(prefill);
+    if (typeof c.callGenericPopup === 'function' && c.POPUP_TYPE) {
+        const promise = c.callGenericPopup(panel, c.POPUP_TYPE.TEXT, '', {
+            large: true,
+            wide: true,
+            allowVerticalScrolling: true,
+            okButton: '关闭',
+            cancelButton: false,
+        });
+        setTimeout(() => {
+            try { panel.querySelector('.kws-input').focus(); } catch (e) { /* ignore */ }
+            if (prefill) doSearch(panel);
+        }, 50);
+        await promise;
+    } else {
+        showFallback(panel);
+        if (prefill) doSearch(panel);
+    }
 }
 
 // 在魔棒（扩展）菜单里加一个入口
@@ -387,27 +404,37 @@ function addLauncher() {
     item.className = 'list-group-item flex-container flexGap5 interactable';
     item.tabIndex = 0;
     item.innerHTML = `<div class="fa-fw fa-solid fa-magnifying-glass extensionsMenuExtensionButton"></div><span>关键词搜索</span>`;
-    item.addEventListener('click', () => openModal());
+    item.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openModal(); });
     menu.appendChild(item);
 }
 
-// 斜杠命令 /kwsearch [关键词]（best-effort，失败不影响主功能）
+// 斜杠命令 /kwsearch [关键词]
 function registerSlash() {
     const c = ctx();
+    // 新版 API
     try {
-        if (typeof c.registerSlashCommand === 'function') {
-            c.registerSlashCommand('kwsearch', (_, value) => {
-                openModal(value ? `${value}`.trim() : '');
-                return '';
-            }, [], '打开关键词搜索面板，可附带关键词', true, true);
+        if (c.SlashCommandParser && c.SlashCommand && typeof c.SlashCommand.fromProps === 'function') {
+            c.SlashCommandParser.addCommandObject(c.SlashCommand.fromProps({
+                name: 'kwsearch',
+                callback: (_args, value) => { openModal(value ? `${value}`.trim() : ''); return ''; },
+                helpString: '打开关键词搜索面板，可附带关键词',
+            }));
+            return;
         }
     } catch (e) {
-        console.warn(`[${EXT_ID}] 斜杠命令注册失败（不影响面板使用）`, e);
+        console.warn(`[${EXT_ID}] 新版斜杠命令注册失败`, e);
+    }
+    // 旧版兜底
+    try {
+        if (typeof c.registerSlashCommand === 'function') {
+            c.registerSlashCommand('kwsearch', (_, value) => { openModal(value ? `${value}`.trim() : ''); return ''; }, [], '打开关键词搜索面板', true, true);
+        }
+    } catch (e) {
+        console.warn(`[${EXT_ID}] 旧版斜杠命令注册失败`, e);
     }
 }
 
 function init() {
-    injectModal();
     registerSlash();
     // 魔棒菜单可能晚于扩展加载，轮询挂入口
     let n = 0;

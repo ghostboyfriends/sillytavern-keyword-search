@@ -207,3 +207,32 @@
         border: none;
     }
 }
+
+/* ---- 原生弹窗内的面板布局 ---- */
+.kwsearch-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    text-align: left;
+    color: var(--SmartThemeBodyColor, #ddd);
+}
+
+.kwsearch-title {
+    font-weight: 600;
+    font-size: 1.05em;
+}
+
+.kwsearch-panel .text_pole {
+    width: 100%;
+}
+
+.kwsearch-panel .kwsearch-results {
+    flex: none;
+    max-height: 45vh;
+    padding: 0;
+    overflow-y: auto;
+}
+
+.kwsearch-panel .kwsearch-summary {
+    padding: 2px 0;
+}
