@@ -3,14 +3,18 @@
     inset: 0;
     z-index: 10000;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
+    padding: 5vh 12px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     background: rgba(0, 0, 0, 0.45);
 }
 
 .kwsearch-box {
-    width: min(720px, 92vw);
-    max-height: 82vh;
+    width: min(720px, 100%);
+    max-height: calc(100dvh - 10vh);
+    margin: auto;
     display: flex;
     flex-direction: column;
     background: var(--SmartThemeBlurTintColor, #1e1e22);
@@ -86,6 +90,8 @@
 .kwsearch-results {
     padding: 4px 16px 16px;
     overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 .kwsearch-group {
@@ -184,4 +190,20 @@
 #kwsearch-go:disabled {
     opacity: .5;
     cursor: default;
+}
+
+/* 窄屏（手机）适配：满宽、贴顶、占满高度 */
+@media (max-width: 600px) {
+    .kwsearch-modal {
+        padding: 0;
+    }
+
+    .kwsearch-box {
+        width: 100%;
+        max-height: 100dvh;
+        height: 100dvh;
+        margin: 0;
+        border-radius: 0;
+        border: none;
+    }
 }
