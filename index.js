@@ -7,6 +7,71 @@ const EXT_ID = 'keyword-search';
 const ctx = () => SillyTavern.getContext();
 
 /* ============================================================
+ * 持久化存储（历史记录 / 上次搜索状态，存进酒馆扩展设置）
+ * ========================================================== */
+
+const HISTORY_MAX = 10;
+
+function getStore() {
+    const c = ctx();
+    const root = c.extensionSettings || c.extension_settings;
+    if (!root) return null;
+    if (!root[EXT_ID]) root[EXT_ID] = {};
+    return root[EXT_ID];
+}
+
+function saveStore() {
+    try {
+        const save = ctx().saveSettingsDebounced;
+        if (typeof save === 'function') save();
+    } catch (e) { /* ignore */ }
+}
+
+function getHistory() {
+    const s = getStore();
+    return (s && Array.isArray(s.history)) ? s.history : [];
+}
+
+function addHistory(q) {
+    const s = getStore();
+    if (!s) return;
+    let h = Array.isArray(s.history) ? s.history.filter(x => x !== q) : [];
+    h.unshift(q);
+    s.history = h.slice(0, HISTORY_MAX);
+    saveStore();
+}
+
+function removeHistory(q) {
+    const s = getStore();
+    if (!s) return;
+    s.history = (s.history || []).filter(x => x !== q);
+    saveStore();
+}
+
+function clearHistory() {
+    const s = getStore();
+    if (!s) return;
+    s.history = [];
+    saveStore();
+}
+
+function saveLastState(query, scopes, opts) {
+    const s = getStore();
+    if (!s) return;
+    s.last = { query, scopes, opts };
+    saveStore();
+}
+
+function getLastState() {
+    const s = getStore();
+    return s ? s.last : null;
+}
+
+// 上次搜索结果（仅本会话内存，不持久化——结果可能过时且体积大）
+let kwLastGroups = null;
+let kwLastQuery = '';
+
+/* ============================================================
  * 数据访问层（多路探测 + 降级）
  * 字段名各版本偶有差异，跑不出来时按 F12 里 SillyTavern.getContext()
  * 看到的真实字段名微调下面几行即可。
@@ -40,7 +105,7 @@ async function getWorldInfoEntries() {
                 const e = entries[uid];
                 const keys = [].concat(e.key || [], e.keysecondary || []);
                 const title = e.comment || (keys.length ? keys.join(', ') : `#${uid}`);
-                out.push({ title: `${name} · ${title}`, content: `${e.content || ''}` });
+                out.push({ title: `${name} · ${title}`, content: `${e.content || ''}`, jump: { type: 'wi', book: name, uid } });
             }
         } catch (err) {
             console.warn(`[${EXT_ID}] 世界书读取失败: ${name}`, err);
@@ -49,29 +114,33 @@ async function getWorldInfoEntries() {
     return out;
 }
 
-// 把一个角色对象拆成可搜索的字段
-function characterToItems(ch) {
+// 把一个角色对象拆成可搜索的字段。withJump=true 时附带跳转信息（仅当前角色用）
+function characterToItems(ch, withJump) {
     if (!ch) return [];
     const d = ch.data || {};
     const fields = [
-        ['描述 description', ch.description ?? d.description],
-        ['性格 personality', ch.personality ?? d.personality],
-        ['场景 scenario', ch.scenario ?? d.scenario],
-        ['开场白 first_mes', ch.first_mes ?? d.first_mes],
-        ['对话示例 mes_example', ch.mes_example ?? d.mes_example],
-        ['创作笔记 creator_notes', d.creator_notes],
-        ['系统提示 system_prompt', d.system_prompt],
-        ['历史后指令 post_history', d.post_history_instructions],
+        ['description', '描述 description', ch.description ?? d.description],
+        ['personality', '性格 personality', ch.personality ?? d.personality],
+        ['scenario', '场景 scenario', ch.scenario ?? d.scenario],
+        ['first_mes', '开场白 first_mes', ch.first_mes ?? d.first_mes],
+        ['mes_example', '对话示例 mes_example', ch.mes_example ?? d.mes_example],
+        ['creator_notes', '创作笔记 creator_notes', d.creator_notes],
+        ['system_prompt', '系统提示 system_prompt', d.system_prompt],
+        ['post_history', '历史后指令 post_history', d.post_history_instructions],
     ];
     return fields
-        .filter(([, v]) => v && `${v}`.trim())
-        .map(([label, v]) => ({ title: `${ch.name} · ${label}`, content: `${v}` }));
+        .filter(([, , v]) => v && `${v}`.trim())
+        .map(([key, label, v]) => {
+            const item = { title: `${ch.name} · ${label}`, content: `${v}` };
+            if (withJump) item.jump = { type: 'char', field: key };
+            return item;
+        });
 }
 
 // 当前角色卡
 function getCharacterFields() {
     const c = ctx();
-    return characterToItems(c.characters && c.characters[c.characterId]);
+    return characterToItems(c.characters && c.characters[c.characterId], true);
 }
 
 // 全部角色卡（浅加载的角色需先 unshallow 才有正文）
@@ -100,6 +169,7 @@ function getChatMessages() {
     return chat.map((m, i) => ({
         title: `#${i} ${m.is_user ? (c.name1 || 'You') : (m.name || 'Char')}`,
         content: `${m.mes || ''}`,
+        jump: { type: 'chat', mesid: i },
     }));
 }
 
@@ -210,7 +280,7 @@ function scan(items, query, opts) {
         }
         if (count > 0) {
             total += count;
-            results.push({ title: item.title, count, snippets });
+            results.push({ title: item.title, count, snippets, jump: item.jump });
         }
     }
     results.sort((a, b) => b.count - a.count);
@@ -222,7 +292,7 @@ async function runSearch(query, scopes, opts, onProgress) {
     if (scopes.preset) {
         const items = getPresetPrompts()
             .filter(p => !p.marker && p.content)
-            .map(p => ({ title: p.name || p.identifier || '(未命名条目)', content: `${p.content}` }));
+            .map(p => ({ title: p.name || p.identifier || '(未命名条目)', content: `${p.content}`, jump: { type: 'preset', identifier: p.identifier, name: p.name } }));
         groups.push({ label: '当前预设', icon: 'fa-sliders', ...scan(items, query, opts) });
     }
     if (scopes.world) {
@@ -257,10 +327,30 @@ function esc(s) {
 
 /* ---------- UI（使用酒馆原生弹窗渲染，移动端更稳） ---------- */
 
+// 可选配色：8 套色系 + 跟随酒馆主题 + 跟随时间
+const KW_DEFAULT_THEME = 'mist';
+
 const PANEL_HTML = `
-<div class="kwsearch-panel">
-  <div class="kwsearch-title"><i class="fa-solid fa-magnifying-glass"></i> 关键词搜索</div>
-  <input type="text" class="text_pole kws-input" placeholder="输入关键词，例如：女性向" />
+<div class="kwsearch-panel" data-theme="mist">
+ <div class="kwsearch-glass">
+  <div class="kwsearch-head">
+    <div class="kwsearch-title"><span class="kwsearch-ic"><i class="fa-solid fa-magnifying-glass"></i></span>关键词搜索</div>
+    <div class="kwsearch-sw">
+      <button class="kws-dot" data-t="gold" style="background:linear-gradient(160deg,#fbe6a8,#d4a73c)" title="黑金"></button>
+      <button class="kws-dot" data-t="violet" style="background:linear-gradient(160deg,#ecc4ff,#a64dff)" title="粉紫"></button>
+      <button class="kws-dot" data-t="crimson" style="background:linear-gradient(135deg,#6db4ff,#ff8aa3)" title="红蓝"></button>
+      <button class="kws-dot" data-t="emerald" style="background:linear-gradient(160deg,#9bf0cf,#1fae7e)" title="祖母绿"></button>
+      <button class="kws-dot" data-t="ocean" style="background:linear-gradient(160deg,#a6e6fa,#1f93c9)" title="深海"></button>
+      <button class="kws-dot" data-t="mist" style="background:linear-gradient(160deg,#fbfcff,#aeb8e0)" title="月白"></button>
+      <button class="kws-dot" data-t="sakura" style="background:linear-gradient(160deg,#ffe1ec,#f3a8c4)" title="樱粉"></button>
+      <button class="kws-dot" data-t="sunset" style="background:linear-gradient(160deg,#ffd9b3,#f2884b)" title="落日"></button>
+      <button class="kws-dot kws-special" data-t="follow" title="跟随酒馆主题"><i class="fa-solid fa-palette"></i></button>
+      <button class="kws-dot kws-time" data-t="auto" title="跟随时间"><i class="fa-solid fa-sun"></i></button>
+      <button class="kws-close" title="关闭"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+  </div>
+  <input type="text" class="kws-input" placeholder="输入关键词，例如：女性向" />
+  <div class="kwsearch-history"></div>
   <div class="kwsearch-scopes">
     <label><input type="checkbox" data-scope="preset" checked> 当前预设</label>
     <label><input type="checkbox" data-scope="world" checked> 世界书</label>
@@ -276,11 +366,49 @@ const PANEL_HTML = `
   <div class="kwsearch-opts">
     <label><input type="checkbox" class="kws-case"> 区分大小写</label>
     <label><input type="checkbox" class="kws-regex"> 正则模式</label>
-    <button class="menu_button kws-go">搜索</button>
+    <button class="kws-help" title="正则模式说明">?</button>
+    <button class="kws-go"><i class="fa-solid fa-magnifying-glass"></i>搜索</button>
   </div>
+  <div class="kwsearch-helpbox" hidden>正则模式：把关键词当成「正则表达式」来匹配，可用符号做高级/模糊搜索。例如 <code>女(性|权)</code> 同时匹配「女性」和「女权」，<code>\\d+</code> 匹配任意数字。不清楚就别勾，保持普通文字搜索即可。</div>
   <div class="kwsearch-summary"></div>
   <div class="kwsearch-results"></div>
+ </div>
 </div>`;
+
+const KW_NIGHT_THEME = 'ocean';
+const KW_DAY_THEME = 'mist';
+
+function getTheme() {
+    const s = getStore();
+    return (s && s.theme) ? s.theme : KW_DEFAULT_THEME;
+}
+
+function setTheme(key) {
+    const s = getStore();
+    if (s) { s.theme = key; saveStore(); }
+}
+
+function isDaytime() {
+    const h = new Date().getHours();
+    return h >= 6 && h < 18;
+}
+
+function resolveTheme(key) {
+    if (key === 'auto') return isDaytime() ? KW_DAY_THEME : KW_NIGHT_THEME;
+    return key;
+}
+
+function applyTheme(panel, key) {
+    panel.setAttribute('data-theme', resolveTheme(key));
+    panel.querySelectorAll('.kws-dot').forEach(d => d.classList.toggle('on', d.dataset.t === key));
+    const auto = panel.querySelector('.kws-dot[data-t="auto"]');
+    if (auto) {
+        const day = isDaytime();
+        auto.classList.toggle('day', day);
+        auto.classList.toggle('night', !day);
+        auto.innerHTML = `<i class="fa-solid ${day ? 'fa-sun' : 'fa-moon'}"></i>`;
+    }
+}
 
 function renderResults(panel, groups, query) {
     const summary = panel.querySelector('.kwsearch-summary');
@@ -289,6 +417,7 @@ function renderResults(panel, groups, query) {
     const hits = groups.reduce((a, g) => a + g.results.length, 0);
     summary.innerHTML = `关键词 “<b>${esc(query)}</b>” 共出现 <b>${grand}</b> 次，分布在 <b>${hits}</b> 个条目中。`;
 
+    const jumps = [];
     let html = '';
     for (const g of groups) {
         html += `<div class="kwsearch-group">
@@ -298,9 +427,14 @@ function renderResults(panel, groups, query) {
             html += `<div class="kwsearch-empty">无匹配</div>`;
         } else {
             for (const r of g.results) {
-                html += `<div class="kwsearch-item">
+                let attr = '';
+                if (r.jump) {
+                    attr = ` data-jump="${jumps.length}" title="点击跳转到该位置"`;
+                    jumps.push(r.jump);
+                }
+                html += `<div class="kwsearch-item${r.jump ? ' kwsearch-clickable' : ''}"${attr}>
                   <div class="kwsearch-item-head">
-                    <span class="kwsearch-title">${esc(r.title)}</span>
+                    <span class="kwsearch-title">${esc(r.title)}${r.jump ? ' <i class="fa-solid fa-arrow-right-to-bracket kwsearch-jump-icon"></i>' : ''}</span>
                     <span class="kwsearch-count">×${r.count}</span>
                   </div>`;
                 for (const s of r.snippets) {
@@ -315,6 +449,7 @@ function renderResults(panel, groups, query) {
         html += `</div>`;
     }
     box.innerHTML = html;
+    panel._kwJumps = jumps;
 }
 
 let kwSearching = false;
@@ -341,12 +476,207 @@ async function doSearch(panel) {
         const onProgress = (stage) => { summary.textContent = `搜索中… ${stage}`; };
         const groups = await runSearch(query, scopes, opts, onProgress);
         renderResults(panel, groups, query);
+        // 记录历史 + 上次状态 + 缓存结果
+        addHistory(query);
+        saveLastState(query, scopes, opts);
+        kwLastGroups = groups;
+        kwLastQuery = query;
+        renderHistory(panel);
     } catch (e) {
         summary.innerHTML = `<span class="kwsearch-error">${esc(e.message)}</span>`;
     } finally {
         kwSearching = false;
         goBtn.disabled = false;
     }
+}
+
+// 渲染最近搜索记录
+function renderHistory(panel) {
+    const box = panel.querySelector('.kwsearch-history');
+    if (!box) return;
+    const h = getHistory();
+    if (!h.length) { box.innerHTML = ''; return; }
+    let html = '<span class="kws-hist-label">最近</span>';
+    for (const q of h) {
+        html += `<span class="kws-hist-chip" data-q="${esc(q)}"><span class="kws-hist-q">${esc(q)}</span><i class="fa-solid fa-xmark kws-hist-del" title="删除"></i></span>`;
+    }
+    html += '<span class="kws-hist-clear" title="清空全部">清空</span>';
+    box.innerHTML = html;
+}
+
+// 恢复勾选状态
+function applyScopes(panel, scopes, opts) {
+    if (scopes) {
+        panel.querySelectorAll('[data-scope]').forEach(cb => {
+            if (Object.prototype.hasOwnProperty.call(scopes, cb.dataset.scope)) cb.checked = !!scopes[cb.dataset.scope];
+        });
+    }
+    if (opts) {
+        const cs = panel.querySelector('.kws-case'); if (cs) cs.checked = !!opts.caseSensitive;
+        const rg = panel.querySelector('.kws-regex'); if (rg) rg.checked = !!opts.regex;
+    }
+}
+
+/* ---------- 跳转到关键词所在位置 ---------- */
+
+function kwToast(msg, type) {
+    try {
+        if (typeof toastr !== 'undefined') (toastr[type] || toastr.info)(msg);
+        else console.log(`[${EXT_ID}] ${msg}`);
+    } catch (e) { /* ignore */ }
+}
+
+function waitFor(getter, timeout = 4000, interval = 80) {
+    return new Promise((resolve) => {
+        const start = Date.now();
+        const tick = () => {
+            let v;
+            try { v = getter(); } catch (e) { v = null; }
+            if (v) return resolve(v);
+            if (Date.now() - start >= timeout) return resolve(null);
+            setTimeout(tick, interval);
+        };
+        tick();
+    });
+}
+
+function flash(el) {
+    if (!el) return;
+    el.classList.add('kwsearch-flash');
+    setTimeout(() => el.classList.remove('kwsearch-flash'), 2000);
+}
+
+function jumpTo(jump, panel) {
+    // 先关闭搜索弹窗，露出目标
+    try {
+        const dlg = panel.closest('dialog');
+        const ok = dlg && dlg.querySelector('.popup-button-ok');
+        if (ok) ok.click();
+        else if (panel.closest('.kwsearch-modal')) panel.closest('.kwsearch-modal').remove();
+    } catch (e) { /* ignore */ }
+    setTimeout(() => {
+        Promise.resolve(doJump(jump)).catch(err => {
+            console.warn(`[${EXT_ID}] 跳转失败`, jump, err);
+            kwToast('未能自动定位，请手动查找该条目', 'warning');
+        });
+    }, 300);
+}
+
+async function doJump(jump) {
+    switch (jump.type) {
+        case 'chat': return jumpChat(jump.mesid);
+        case 'wi': return jumpWorldInfo(jump.book, jump.uid);
+        case 'preset': return jumpPreset(jump.identifier, jump.name);
+        case 'char': return jumpChar(jump.field);
+    }
+}
+
+function jumpChat(mesid) {
+    const el = document.querySelector(`.mes[mesid="${mesid}"]`);
+    if (!el) { kwToast('没找到这条消息（可能已不在当前聊天）', 'warning'); return; }
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    flash(el);
+}
+
+async function jumpWorldInfo(book, uid) {
+    const $ = window.jQuery;
+    if (!$) return;
+    // 复刻 openWorldInfoEditor：打开世界书抽屉 + 选中对应书
+    if (!$('#WorldInfo').is(':visible')) $('#WIDrawerIcon').trigger('click');
+    const names = ctx().getWorldInfoNames ? ctx().getWorldInfoNames() : (window.world_names || []);
+    const index = names.indexOf(book);
+    if (index < 0) { kwToast(`没找到世界书：${book}`, 'warning'); return; }
+    $('#world_editor_select').val(index).trigger('change');
+    const sel = `#world_popup_entries_list [uid="${uid}"]`;
+    const el = await waitFor(() => document.querySelector(sel), 5000);
+    if (!el) { kwToast('已打开世界书，请在其中查找该条目', 'info'); return; }
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    flash(el);
+}
+
+// 在提示词管理器列表里按 identifier 精确找条目（避开选择器转义问题）
+function findPresetItem(identifier) {
+    const list = document.getElementById('completion_prompt_manager_list');
+    if (!list) return null;
+    return Array.from(list.querySelectorAll('[data-pm-identifier]'))
+        .find(el => el.getAttribute('data-pm-identifier') === identifier) || null;
+}
+
+async function jumpPreset(identifier, name) {
+    // 首选：直接拿到 openai.js 的 promptManager 实例，程序化打开编辑框
+    // （不依赖列表是否渲染、抽屉是否打开）
+    try {
+        const mod = await import('/scripts/openai.js');
+        const pm = mod && mod.promptManager;
+        if (pm && typeof pm.getPromptById === 'function') {
+            const prompt = pm.getPromptById(identifier);
+            if (prompt) {
+                if (typeof pm.clearEditForm === 'function') pm.clearEditForm();
+                if (typeof pm.clearInspectForm === 'function') pm.clearInspectForm();
+                pm.loadPromptIntoEditForm(prompt);
+                pm.showPopup();
+                return;
+            }
+        }
+    } catch (e) {
+        console.warn(`[${EXT_ID}] 直接调用 promptManager 失败，改用 DOM 方式`, e);
+    }
+
+    // 兜底：找列表条目点编辑按钮
+    let item = findPresetItem(identifier);
+    if (!item) {
+        const icon = document.getElementById('leftNavDrawerIcon');
+        if (icon && icon.classList.contains('closedIcon')) icon.click();
+        item = await waitFor(() => findPresetItem(identifier), 4000);
+    }
+    if (!item) {
+        const list = document.getElementById('completion_prompt_manager_list');
+        console.warn(`[${EXT_ID}] 未找到预设条目`, { identifier, listExists: !!list, itemCount: list ? list.querySelectorAll('[data-pm-identifier]').length : 0 });
+        kwToast(`请在「AI 响应配置 → 提示词管理器」中查看：${name || identifier}`, 'info');
+        return;
+    }
+    item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    flash(item);
+    const action = item.querySelector('.prompt-manager-edit-action') || item.querySelector('.prompt-manager-inspect-action');
+    if (action) action.click();
+}
+
+const CHAR_MAIN_FIELDS = { description: '#description_textarea', first_mes: '#firstmessage_textarea' };
+const CHAR_ADV_FIELDS = {
+    personality: '#personality_textarea',
+    scenario: '#scenario_pole, #scenario',
+    mes_example: '#mes_example_textarea',
+    creator_notes: '#creator_notes_textarea',
+    system_prompt: '#system_prompt_textarea',
+    post_history: '#post_history_instructions_textarea, #post_history_instructions',
+};
+
+async function jumpChar(field) {
+    const $ = window.jQuery;
+    // 主面板字段
+    if (CHAR_MAIN_FIELDS[field]) {
+        const el = document.querySelector(CHAR_MAIN_FIELDS[field]);
+        if (el && el.offsetParent !== null) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            flash(el);
+            try { el.focus(); } catch (e) { /* ignore */ }
+            return;
+        }
+        kwToast('请在角色卡面板中查看该字段', 'info');
+        return;
+    }
+    // 高级定义弹窗字段
+    const selector = CHAR_ADV_FIELDS[field];
+    if (!selector) { kwToast('请在角色卡中查看该字段', 'info'); return; }
+    if ($ && !$('#character_popup').hasClass('open')) $('#advanced_div').trigger('click');
+    const el = await waitFor(() => {
+        const e = document.querySelector(selector);
+        return (e && e.offsetParent !== null) ? e : null;
+    }, 3000);
+    if (!el) { kwToast('已打开角色高级定义，请查找该字段', 'info'); return; }
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    flash(el);
+    try { el.focus(); } catch (e) { /* ignore */ }
 }
 
 function buildPanel(prefill) {
@@ -356,7 +686,62 @@ function buildPanel(prefill) {
     const input = panel.querySelector('.kws-input');
     panel.querySelector('.kws-go').addEventListener('click', () => doSearch(panel));
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSearch(panel); } });
-    if (prefill) input.value = prefill;
+    // 结果点击跳转（事件委托）
+    panel.querySelector('.kwsearch-results').addEventListener('click', (e) => {
+        const item = e.target.closest('.kwsearch-item[data-jump]');
+        if (!item) return;
+        const jumps = panel._kwJumps || [];
+        const jump = jumps[Number(item.dataset.jump)];
+        if (jump) jumpTo(jump, panel);
+    });
+    // 历史记录点击（事件委托）
+    panel.querySelector('.kwsearch-history').addEventListener('click', (e) => {
+        const del = e.target.closest('.kws-hist-del');
+        if (del) {
+            e.stopPropagation();
+            const chip = del.closest('.kws-hist-chip');
+            if (chip) { removeHistory(chip.dataset.q); renderHistory(panel); }
+            return;
+        }
+        if (e.target.closest('.kws-hist-clear')) { clearHistory(); renderHistory(panel); return; }
+        const chip = e.target.closest('.kws-hist-chip');
+        if (chip) { input.value = chip.dataset.q; doSearch(panel); }
+    });
+
+    // 恢复上次搜索界面
+    const last = getLastState();
+    if (last) applyScopes(panel, last.scopes, last.opts);
+    if (prefill) {
+        input.value = prefill;
+    } else if (kwLastQuery) {
+        input.value = kwLastQuery;
+    } else if (last && last.query) {
+        input.value = last.query;
+    }
+    renderHistory(panel);
+    if (!prefill && kwLastGroups) {
+        renderResults(panel, kwLastGroups, kwLastQuery);
+    }
+
+    // 配色色卡切换
+    panel.querySelectorAll('.kws-dot').forEach(d => {
+        d.addEventListener('click', () => { setTheme(d.dataset.t); applyTheme(panel, d.dataset.t); });
+    });
+    applyTheme(panel, getTheme());
+
+    // 关闭按钮
+    panel.querySelector('.kws-close').addEventListener('click', () => {
+        const dlg = panel.closest('dialog');
+        const btn = dlg && (dlg.querySelector('.popup-button-ok') || dlg.querySelector('.popup-button-close'));
+        if (btn) btn.click();
+        else if (panel.closest('.kwsearch-modal')) panel.closest('.kwsearch-modal').remove();
+    });
+
+    // 正则说明 ? 开关
+    const help = panel.querySelector('.kws-help');
+    const helpbox = panel.querySelector('.kwsearch-helpbox');
+    help.addEventListener('click', () => { helpbox.hidden = !helpbox.hidden; });
+
     return panel;
 }
 

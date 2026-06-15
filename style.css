@@ -1,238 +1,135 @@
-.kwsearch-modal {
-    position: fixed;
-    inset: 0;
-    z-index: 10000;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding: 5vh 12px;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    background: rgba(0, 0, 0, 0.45);
+/* 关键词搜索 Keyword Search — 高级 UI v1.5
+ * 玻璃拟态面板 + 可切换珠宝色主题（含跟随酒馆主题 / 跟随时间）。
+ */
+
+/* ===== 让酒馆原生弹窗外框隐形，只露出玻璃面板 ===== */
+.popup:has(.kwsearch-panel){background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}
+.popup:has(.kwsearch-panel) .popup-body,
+.popup:has(.kwsearch-panel) .popup-content{padding:0!important;margin:0!important}
+.popup:has(.kwsearch-panel) .popup-controls{display:none!important}
+
+/* ===== 主题令牌（基准=黑金） ===== */
+.kwsearch-panel{
+  --bg1:#1e160c;--bg2:#352815;--bg3:#16110a;--accent:#eccb78;--accent2:#fbe6a8;--accentDk:#4a3608;--goText:#2c1f05;
+  --ink:#f6efdd;--muted:rgba(246,239,221,.6);--glass:rgba(255,240,200,.07);--glass2:rgba(255,240,200,.15);
+  --line:rgba(255,240,200,.2);--hi:rgba(255,255,255,.18);--inputBg:rgba(0,0,0,.2);--shadow:0 22px 54px rgba(0,0,0,.45);
+  width:min(560px,100%);box-sizing:border-box;margin:0 auto;padding:16px;border-radius:24px;
+  background:radial-gradient(125% 120% at 0% 0%,var(--bg2),var(--bg1) 48%,var(--bg3) 100%);
+  box-shadow:var(--shadow);text-align:left}
+.kwsearch-panel[data-theme=violet]{--bg1:#241338;--bg2:#3f2168;--bg3:#1a0c2e;--accent:#cf8cff;--accent2:#ecc4ff;--accentDk:#3a1860;--goText:#2a0f45;--ink:#f3ebfa;--muted:rgba(243,235,250,.6);--glass:rgba(220,170,255,.08);--glass2:rgba(220,170,255,.16);--line:rgba(220,170,255,.2);--inputBg:rgba(0,0,0,.2)}
+.kwsearch-panel[data-theme=crimson]{--bg1:#101a40;--bg2:#2c1430;--bg3:#0b0d22;--accent:#6db4ff;--accent2:#ff9fb3;--accentDk:#0a1430;--goText:#0a1430;--ink:#e9eefb;--muted:rgba(233,238,251,.6);--glass:rgba(150,175,255,.08);--glass2:rgba(150,175,255,.15);--line:rgba(150,175,255,.2);--inputBg:rgba(0,0,0,.2)}
+.kwsearch-panel[data-theme=emerald]{--bg1:#0f2a20;--bg2:#15543f;--bg3:#0a201a;--accent:#3fd6a0;--accent2:#9bf0cf;--accentDk:#064233;--goText:#06291e;--ink:#e7f7ef;--muted:rgba(231,247,239,.6);--glass:rgba(120,240,200,.07);--glass2:rgba(120,240,200,.14);--line:rgba(120,240,200,.2);--inputBg:rgba(0,0,0,.2)}
+.kwsearch-panel[data-theme=ocean]{--bg1:#0c2236;--bg2:#10456b;--bg3:#081726;--accent:#4cc6f0;--accent2:#a6e6fa;--accentDk:#06354a;--goText:#062a3a;--ink:#e6f4fb;--muted:rgba(230,244,251,.6);--glass:rgba(120,200,255,.07);--glass2:rgba(120,200,255,.14);--line:rgba(120,200,255,.2);--inputBg:rgba(0,0,0,.2)}
+.kwsearch-panel[data-theme=mist]{--bg1:#eef1f8;--bg2:#dde3f2;--bg3:#f6f8fd;--accent:#6b7bd6;--accent2:#97a4e6;--accentDk:#2e3a7a;--goText:#ffffff;--ink:#2b2f3c;--muted:rgba(43,47,60,.58);--glass:rgba(255,255,255,.5);--glass2:rgba(255,255,255,.72);--line:rgba(70,80,130,.2);--hi:rgba(255,255,255,.9);--inputBg:rgba(255,255,255,.6);--shadow:0 18px 44px rgba(60,70,120,.2)}
+.kwsearch-panel[data-theme=sakura]{--bg1:#fdeef3;--bg2:#f9dde8;--bg3:#fff6f9;--accent:#e8709a;--accent2:#f4a8c5;--accentDk:#8a2f53;--goText:#ffffff;--ink:#4a2a36;--muted:rgba(74,42,54,.58);--glass:rgba(255,255,255,.5);--glass2:rgba(255,255,255,.74);--line:rgba(180,90,130,.22);--hi:rgba(255,255,255,.9);--inputBg:rgba(255,255,255,.62);--shadow:0 18px 44px rgba(150,80,110,.2)}
+.kwsearch-panel[data-theme=sunset]{--bg1:#fdeede;--bg2:#fad9bd;--bg3:#fff7ee;--accent:#f2884b;--accent2:#f9b487;--accentDk:#8a3d12;--goText:#3a1605;--ink:#4a3322;--muted:rgba(74,51,34,.58);--glass:rgba(255,255,255,.5);--glass2:rgba(255,255,255,.74);--line:rgba(190,110,60,.22);--hi:rgba(255,255,255,.9);--inputBg:rgba(255,255,255,.62);--shadow:0 18px 44px rgba(180,110,60,.2)}
+.kwsearch-panel[data-theme=follow]{--bg1:var(--SmartThemeBlurTintColor,#1b2230);--bg2:var(--SmartThemeBlurTintColor,#27303f);--bg3:var(--SmartThemeBlurTintColor,#141923);--accent:var(--SmartThemeQuoteColor,#7fb1ff);--accent2:var(--SmartThemeQuoteColor,#b3d2ff);--accentDk:var(--SmartThemeQuoteColor,#0c3060);--goText:var(--SmartThemeBodyColor,#e8eef7);--ink:var(--SmartThemeBodyColor,#e8eef7);--muted:color-mix(in srgb,var(--SmartThemeBodyColor,#e8eef7) 60%,transparent);--glass:color-mix(in srgb,var(--SmartThemeQuoteColor,#88a) 8%,transparent);--glass2:color-mix(in srgb,var(--SmartThemeQuoteColor,#88a) 16%,transparent);--line:var(--SmartThemeBorderColor,rgba(150,180,230,.2));--inputBg:rgba(0,0,0,.18)}
+.kwsearch-panel[data-theme=follow] .kws-go{color:var(--ink);background:color-mix(in srgb,var(--accent) 28%,transparent);border:1px solid var(--accent)}
+
+/* ===== 玻璃卡片 ===== */
+.kwsearch-glass{padding:20px;border-radius:18px;color:var(--ink);border:1px solid var(--line);background:linear-gradient(180deg,var(--glass2),var(--glass));backdrop-filter:blur(20px) saturate(1.3);-webkit-backdrop-filter:blur(20px) saturate(1.3);box-shadow:inset 0 1px 0 var(--hi);display:flex;flex-direction:column;gap:12px}
+
+/* ===== 标题 + 色卡 + 关闭 ===== */
+.kwsearch-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.kwsearch-head .kwsearch-title{display:flex;align-items:center;gap:11px;font-size:17px;font-weight:600;letter-spacing:.3px;flex:none;padding-top:2px}
+.kwsearch-ic{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;font-size:15px;color:var(--accentDk);background:linear-gradient(160deg,var(--accent2),var(--accent));box-shadow:inset 0 1px 0 rgba(255,255,255,.45),0 3px 9px rgba(0,0,0,.22)}
+.kwsearch-sw{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:center;max-width:215px}
+.kws-dot{width:15px;height:15px;border-radius:50%;cursor:pointer;border:none;padding:0;color:#fff;font-size:9px;display:inline-flex;align-items:center;justify-content:center;transition:transform .15s,box-shadow .15s;box-shadow:0 1px 3px rgba(0,0,0,.22)}
+.kws-dot:hover{transform:scale(1.22)}
+.kws-dot.on{box-shadow:0 0 0 1.5px var(--glass2),0 0 0 3px var(--ink)}
+.kws-special{background:rgba(127,127,127,.5)}
+.kws-time.day{background:linear-gradient(160deg,#8fbef5,#4f86d8);color:#fff}
+.kws-time.night{background:linear-gradient(160deg,#f2f4fa,#ccd5e8);color:#10141f}
+.kws-close{width:22px;height:22px;border-radius:50%;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;font-size:12px;display:inline-flex;align-items:center;justify-content:center;margin-left:2px;transition:color .12s,border-color .12s}
+.kws-close:hover{color:var(--ink);border-color:var(--ink)}
+
+/* ===== 输入框 ===== */
+.kws-input{width:100%;box-sizing:border-box;padding:12px 15px;font-size:14px;color:var(--ink);border-radius:13px;border:1px solid var(--line);background:var(--inputBg);box-shadow:inset 0 2px 6px rgba(0,0,0,.18);outline:none;transition:border-color .15s,box-shadow .15s}
+.kws-input::placeholder{color:var(--muted)}
+.kws-input:focus{border-color:var(--accent);box-shadow:inset 0 2px 6px rgba(0,0,0,.18),0 0 0 3px color-mix(in srgb,var(--accent) 30%,transparent)}
+
+/* ===== 历史记录 ===== */
+.kwsearch-history{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.kwsearch-history:empty{display:none}
+.kws-hist-label{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.kws-hist-chip{display:inline-flex;align-items:center;gap:6px;max-width:200px;padding:4px 7px 4px 11px;font-size:12px;border-radius:999px;border:1px solid var(--line);background:color-mix(in srgb,var(--ink) 6%,transparent);cursor:pointer}
+.kws-hist-q{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kws-hist-del{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:11px;opacity:.45;transition:opacity .12s,background .12s,color .12s}
+.kws-hist-del:hover{opacity:1;color:var(--ink);background:color-mix(in srgb,var(--warning,#e57373) 55%,transparent)}
+.kws-hist-clear{font-size:12px;opacity:.55;cursor:pointer;transition:opacity .12s,color .12s}
+.kws-hist-clear:hover{opacity:1;color:var(--accent)}
+
+/* ===== 范围 / 选项胶囊 ===== */
+.kwsearch-scopes,.kwsearch-opts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.kwsearch-scopes label,.kwsearch-opts label{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;font-size:13px;border:1px solid var(--line);border-radius:999px;cursor:pointer;user-select:none;color:var(--ink);background:color-mix(in srgb,var(--ink) 6%,transparent);box-shadow:inset 0 1px 0 rgba(255,255,255,.1);transition:transform .12s,box-shadow .12s,background .15s,color .15s,border-color .15s}
+.kwsearch-scopes label:hover,.kwsearch-opts label:hover{border-color:var(--accent)}
+.kwsearch-scopes label:active,.kwsearch-opts label:active{transform:translateY(1px);box-shadow:inset 0 2px 5px rgba(0,0,0,.3)}
+.kwsearch-scopes label input,.kwsearch-opts label input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.kwsearch-scopes label:has(input:checked),.kwsearch-opts label:has(input:checked){color:var(--accent);font-weight:600;border-color:var(--accent);background:color-mix(in srgb,var(--accent) 20%,transparent);box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 0 14px color-mix(in srgb,var(--accent) 20%,transparent)}
+@supports not selector(:has(*)){.kwsearch-scopes label input,.kwsearch-opts label input{position:static;opacity:1;width:auto;height:auto}}
+.kwsearch-scope-tag{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:4px 9px;border-radius:7px;background:color-mix(in srgb,var(--ink) 7%,transparent)}
+.kwsearch-hint{font-size:12px;font-style:italic;color:var(--muted)}
+
+/* ===== 正则说明 ? ===== */
+.kws-help{width:19px;height:19px;border-radius:50%;border:1px solid var(--line);background:color-mix(in srgb,var(--ink) 8%,transparent);color:var(--ink);font-size:12px;font-weight:600;cursor:pointer;line-height:1;display:inline-flex;align-items:center;justify-content:center;margin-left:-3px}
+.kws-help:hover{border-color:var(--accent);color:var(--accent)}
+.kwsearch-helpbox{font-size:12px;line-height:1.65;color:var(--ink);background:var(--glass2);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:11px;padding:11px 13px}
+.kwsearch-helpbox code{background:color-mix(in srgb,var(--accent) 18%,transparent);padding:1px 5px;border-radius:5px;font-size:11px}
+
+/* ===== 搜索按钮 ===== */
+.kws-go{margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:7px 18px;border:none;border-radius:999px;cursor:pointer;font-size:13px;font-weight:600;color:var(--goText);background:linear-gradient(150deg,var(--accent2),var(--accent));box-shadow:0 4px 16px color-mix(in srgb,var(--accent) 40%,transparent),inset 0 1px 0 rgba(255,255,255,.5);transition:transform .12s,filter .12s,box-shadow .12s}
+.kws-go i{font-size:14px}
+.kws-go:hover{filter:brightness(1.06);transform:translateY(-1px);box-shadow:0 6px 22px color-mix(in srgb,var(--accent) 52%,transparent),inset 0 1px 0 rgba(255,255,255,.5)}
+.kws-go:active{transform:translateY(1px);box-shadow:inset 0 2px 6px rgba(0,0,0,.32)}
+.kws-go:disabled{opacity:.5;box-shadow:none;transform:none;cursor:default}
+
+/* ===== 概要条 ===== */
+.kwsearch-summary{font-size:13px;padding:10px 13px;border-radius:11px;background:var(--inputBg);border-left:3px solid var(--accent)}
+.kwsearch-summary:empty{display:none}
+.kwsearch-summary b{color:var(--accent)}
+.kwsearch-error{color:var(--warning,#e57373)}
+
+/* ===== 结果 ===== */
+.kwsearch-results{overflow-y:auto;max-height:48vh;padding-right:4px}
+.kwsearch-results::-webkit-scrollbar{width:8px}
+.kwsearch-results::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+.kwsearch-results::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+@keyframes kwsearch-fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.kwsearch-group{margin-bottom:16px;animation:kwsearch-fade .25s ease both}
+.kwsearch-group-head{display:flex;align-items:center;gap:8px;padding:4px 0 8px;margin-bottom:9px;font-size:13px;font-weight:600;border-bottom:1px solid var(--line)}
+.kwsearch-group-head i{color:var(--accent)}
+.kwsearch-badge{margin-left:auto;padding:3px 9px;font-size:11px;font-weight:400;border-radius:999px;background:color-mix(in srgb,var(--ink) 8%,transparent);color:var(--muted)}
+.kwsearch-empty{font-size:12px;font-style:italic;opacity:.4;padding:2px 0 8px}
+.kwsearch-item{position:relative;padding:12px 14px;margin-bottom:8px;border-radius:13px;border:1px solid var(--line);border-left:2px solid transparent;background:color-mix(in srgb,var(--ink) 5%,transparent);transition:transform .15s,border-color .15s,background .15s}
+.kwsearch-clickable{cursor:pointer;border-left-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.kwsearch-clickable:hover{transform:translateX(3px);border-left-color:var(--accent);background:color-mix(in srgb,var(--ink) 9%,transparent)}
+.kwsearch-item-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px}
+.kwsearch-item .kwsearch-title{font-weight:600;color:var(--accent);word-break:break-all}
+.kwsearch-jump-icon{font-size:12px;opacity:.6;margin-left:5px;transition:opacity .12s,transform .12s}
+.kwsearch-clickable:hover .kwsearch-jump-icon{opacity:1;transform:translateX(2px)}
+.kwsearch-count{font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.kwsearch-snip{font-size:13px;line-height:1.65;color:var(--ink);opacity:.85;padding:2px 0;word-break:break-word;white-space:pre-wrap}
+.kwsearch-snip mark{color:var(--ink);background:color-mix(in srgb,var(--accent) 32%,transparent);border-radius:4px;padding:0 4px;box-shadow:0 0 8px color-mix(in srgb,var(--accent) 30%,transparent)}
+.kwsearch-more{font-size:12px;opacity:.45;padding-top:3px}
+
+/* ===== 跳转目标高亮（作用于酒馆元素，用主题强调色） ===== */
+@keyframes kwsearch-flash-kf{0%{box-shadow:0 0 0 2px var(--SmartThemeQuoteColor,#6cc6ff),0 0 18px var(--SmartThemeQuoteColor,#6cc6ff)}100%{box-shadow:0 0 0 0 transparent}}
+.kwsearch-flash{animation:kwsearch-flash-kf 1.8s ease-out;border-radius:6px}
+
+/* ===== 兜底浮层 ===== */
+.kwsearch-modal{position:fixed;inset:0;z-index:10000;display:flex;align-items:flex-start;justify-content:center;padding:5vh 12px;overflow-y:auto;-webkit-overflow-scrolling:touch;background:rgba(0,0,0,.55)}
+.kwsearch-box{margin:auto;display:flex}
+.kwsearch-box .kwsearch-panel{margin:0}
+
+/* ===== 窄屏 ===== */
+@media (max-width:600px){
+  .kwsearch-panel{padding:10px;border-radius:18px}
+  .kwsearch-glass{padding:15px}
+  .kwsearch-results{max-height:55vh}
+  .kwsearch-modal{padding:0}
 }
 
-.kwsearch-box {
-    width: min(720px, 100%);
-    max-height: calc(100dvh - 10vh);
-    margin: auto;
-    display: flex;
-    flex-direction: column;
-    background: var(--SmartThemeBlurTintColor, #1e1e22);
-    color: var(--SmartThemeBodyColor, #ddd);
-    border: 1px solid var(--SmartThemeBorderColor, #444);
-    border-radius: 12px;
-    backdrop-filter: blur(12px);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, .5);
-    overflow: hidden;
-}
-
-.kwsearch-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    font-weight: 600;
-    font-size: 1.05em;
-    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
-}
-
-.kwsearch-close {
-    cursor: pointer;
-    opacity: .7;
-}
-
-.kwsearch-close:hover {
-    opacity: 1;
-}
-
-.kwsearch-controls {
-    padding: 12px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.kwsearch-controls .text_pole {
-    width: 100%;
-}
-
-.kwsearch-scopes,
-.kwsearch-opts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 14px;
-    align-items: center;
-    font-size: .9em;
-}
-
-.kwsearch-scopes label,
-.kwsearch-opts label {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    cursor: pointer;
-}
-
-.kwsearch-opts #kwsearch-go {
-    margin-left: auto;
-}
-
-.kwsearch-summary {
-    padding: 6px 16px;
-    font-size: .9em;
-    opacity: .95;
-}
-
-.kwsearch-error {
-    color: var(--warning, #e57373);
-}
-
-.kwsearch-results {
-    padding: 4px 16px 16px;
-    overflow-y: auto;
-    flex: 1 1 auto;
-    min-height: 0;
-}
-
-.kwsearch-group {
-    margin-bottom: 14px;
-}
-
-.kwsearch-group-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-weight: 600;
-    padding: 6px 0;
-    border-bottom: 1px dashed var(--SmartThemeBorderColor, #444);
-    margin-bottom: 6px;
-}
-
-.kwsearch-badge {
-    margin-left: auto;
-    font-size: .8em;
-    opacity: .7;
-    font-weight: 400;
-}
-
-.kwsearch-empty {
-    font-size: .85em;
-    opacity: .5;
-    padding: 2px 0 6px;
-}
-
-.kwsearch-item {
-    padding: 8px 10px;
-    margin-bottom: 6px;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, .04);
-}
-
-.kwsearch-item-head {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 4px;
-}
-
-.kwsearch-title {
-    font-weight: 600;
-    color: var(--SmartThemeQuoteColor, #6cf);
-    word-break: break-all;
-}
-
-.kwsearch-count {
-    font-size: .8em;
-    opacity: .7;
-    white-space: nowrap;
-}
-
-.kwsearch-snip {
-    font-size: .85em;
-    line-height: 1.5;
-    opacity: .9;
-    padding: 2px 0;
-    word-break: break-word;
-    white-space: pre-wrap;
-}
-
-.kwsearch-snip mark {
-    background: var(--SmartThemeQuoteColor, #6cf);
-    color: #000;
-    border-radius: 3px;
-    padding: 0 2px;
-}
-
-.kwsearch-more {
-    font-size: .78em;
-    opacity: .5;
-    padding-top: 2px;
-}
-
-.kwsearch-global {
-    align-items: center;
-}
-
-.kwsearch-scope-tag {
-    font-size: .78em;
-    opacity: .65;
-    border: 1px solid var(--SmartThemeBorderColor, #444);
-    border-radius: 4px;
-    padding: 1px 6px;
-}
-
-.kwsearch-hint {
-    font-size: .78em;
-    opacity: .5;
-    font-style: italic;
-}
-
-#kwsearch-go:disabled {
-    opacity: .5;
-    cursor: default;
-}
-
-/* 窄屏（手机）适配：满宽、贴顶、占满高度 */
-@media (max-width: 600px) {
-    .kwsearch-modal {
-        padding: 0;
-    }
-
-    .kwsearch-box {
-        width: 100%;
-        max-height: 100dvh;
-        height: 100dvh;
-        margin: 0;
-        border-radius: 0;
-        border: none;
-    }
-}
-
-/* ---- 原生弹窗内的面板布局 ---- */
-.kwsearch-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    text-align: left;
-    color: var(--SmartThemeBodyColor, #ddd);
-}
-
-.kwsearch-title {
-    font-weight: 600;
-    font-size: 1.05em;
-}
-
-.kwsearch-panel .text_pole {
-    width: 100%;
-}
-
-.kwsearch-panel .kwsearch-results {
-    flex: none;
-    max-height: 45vh;
-    padding: 0;
-    overflow-y: auto;
-}
-
-.kwsearch-panel .kwsearch-summary {
-    padding: 2px 0;
+/* ===== 无障碍：减少动效 ===== */
+@media (prefers-reduced-motion:reduce){
+  .kwsearch-glass *,.kwsearch-group,.kwsearch-flash{animation:none!important;transition:none!important}
 }
