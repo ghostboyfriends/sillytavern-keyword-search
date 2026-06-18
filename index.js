@@ -70,6 +70,7 @@ function getLastState() {
 // 上次搜索结果（仅本会话内存，不持久化——结果可能过时且体积大）
 let kwLastGroups = null;
 let kwLastQuery = '';
+let kwLastOpts = { caseSensitive: false, regex: false };
 
 /* ============================================================
  * 数据访问层（多路探测 + 降级）
@@ -141,6 +142,84 @@ function characterToItems(ch, withJump) {
 function getCharacterFields() {
     const c = ctx();
     return characterToItems(c.characters && c.characters[c.characterId], true);
+}
+
+// 该角色绑定的世界书条目（内嵌 character_book + data.extensions.world + charLore 附加书）
+async function getCharBoundWorldItems(ch) {
+    if (!ch) return [];
+    const c = ctx();
+    const out = [];
+    const bookNames = new Set();
+    const d = ch.data || {};
+    if (d.extensions && d.extensions.world) bookNames.add(d.extensions.world);
+    try {
+        const wiMod = await import('/scripts/world-info.js');
+        const fileName = `${ch.avatar || ''}`.replace(/\.[^.]+$/, '');
+        const lore = (wiMod && wiMod.world_info && Array.isArray(wiMod.world_info.charLore))
+            ? wiMod.world_info.charLore.find(x => x.name === fileName) : null;
+        if (lore && Array.isArray(lore.extraBooks)) lore.extraBooks.forEach(n => bookNames.add(n));
+    } catch (e) { console.warn(`[${EXT_ID}] 读取 charLore 失败`, e); }
+    // 命名世界书（可跳转）
+    const loader = c.loadWorldInfo || (typeof window !== 'undefined' && window.loadWorldInfo);
+    if (loader) {
+        for (const name of bookNames) {
+            try {
+                const data = await loader(name);
+                const entries = (data && data.entries) ? data.entries : {};
+                for (const uid of Object.keys(entries)) {
+                    const e = entries[uid];
+                    const keys = [].concat(e.key || [], e.keysecondary || []);
+                    const title = e.comment || (keys.length ? keys.join(', ') : `#${uid}`);
+                    out.push({ title: `${name} · ${title}`, content: `${e.content || ''}`, jump: { type: 'wi', book: name, uid } });
+                }
+            } catch (e) { console.warn(`[${EXT_ID}] 角色世界书读取失败: ${name}`, e); }
+        }
+    }
+    // 内嵌 character_book（无独立世界书可跳，仅展示）
+    const emb = d.character_book && d.character_book.entries;
+    if (emb) {
+        const list = Array.isArray(emb) ? emb : Object.values(emb);
+        for (const e of list) {
+            if (!e) continue;
+            const keys = [].concat(e.keys || e.key || []);
+            const title = e.comment || (keys.length ? keys.join(', ') : '(内嵌条目)');
+            out.push({ title: `内嵌 · ${title}`, content: `${e.content || ''}` });
+        }
+    }
+    return out;
+}
+
+// 该角色的全部聊天存档（按消息，点击可跳到具体楼层；非当前存档会先打开）
+async function getCharacterChatItems(ch) {
+    if (!ch || !ch.avatar) return [];
+    const c = ctx();
+    const headers = typeof c.getRequestHeaders === 'function' ? c.getRequestHeaders() : {};
+    const out = [];
+    try {
+        const listResp = await fetch('/api/characters/chats', { method: 'POST', headers, body: JSON.stringify({ avatar_url: ch.avatar }) });
+        if (listResp.ok) {
+            const data = await listResp.json();
+            const files = (data && data.error) ? [] : Object.values(data);
+            await Promise.all(files.map(async (f) => {
+                const fileName = `${f.file_name}`.replace(/\.jsonl$/, '');
+                try {
+                    const r = await fetch('/api/chats/get', { method: 'POST', headers, cache: 'no-cache', body: JSON.stringify({ ch_name: ch.name, file_name: fileName, avatar_url: ch.avatar }) });
+                    if (r.ok) {
+                        const arr = await r.json();
+                        const list = Array.isArray(arr) ? arr.slice() : [];
+                        if (list.length) list.shift(); // 首项是元数据
+                        list.forEach((m, i) => {
+                            const mes = m && m.mes ? `${m.mes}` : '';
+                            if (!mes.trim()) return;
+                            const who = m.is_user ? (c.name1 || 'You') : (m.name || ch.name);
+                            out.push({ title: `${fileName} · #${i} ${who}`, content: mes, jump: { type: 'chatfile', file: fileName, mesid: i } });
+                        });
+                    }
+                } catch (e) { console.warn(`[${EXT_ID}] 取该角色聊天失败`, fileName, e); }
+            }));
+        }
+    } catch (e) { console.warn(`[${EXT_ID}] 列该角色聊天失败`, e); }
+    return out;
 }
 
 // 全部角色卡（浅加载的角色需先 unshallow 才有正文）
@@ -293,26 +372,34 @@ async function runSearch(query, scopes, opts, onProgress) {
         const items = getPresetPrompts()
             .filter(p => !p.marker && p.content)
             .map(p => ({ title: p.name || p.identifier || '(未命名条目)', content: `${p.content}`, jump: { type: 'preset', identifier: p.identifier, name: p.name } }));
-        groups.push({ label: '当前预设', icon: 'fa-sliders', ...scan(items, query, opts) });
+        groups.push({ label: '当前预设', icon: 'fa-sliders', cat: 'preset', ...scan(items, query, opts) });
     }
     if (scopes.world) {
         onProgress && onProgress('读取世界书…');
         const items = await getWorldInfoEntries();
-        groups.push({ label: '世界书', icon: 'fa-book', ...scan(items, query, opts) });
+        groups.push({ label: '世界书', icon: 'fa-book', cat: 'wi', ...scan(items, query, opts) });
     }
     if (scopes.char) {
-        groups.push({ label: '当前角色卡', icon: 'fa-user', ...scan(getCharacterFields(), query, opts) });
+        const cc = ctx();
+        const ch = (cc.characters || [])[cc.characterId];
+        groups.push({ label: '当前角色卡', icon: 'fa-user', cat: 'char', ...scan(getCharacterFields(), query, opts) });
+        onProgress && onProgress('读取角色世界书…');
+        const wItems = await getCharBoundWorldItems(ch);
+        if (wItems.length) groups.push({ label: '角色世界书', icon: 'fa-book', cat: 'wi', ...scan(wItems, query, opts) });
+        onProgress && onProgress('扫描该角色聊天…');
+        const cItems = await getCharacterChatItems(ch);
+        if (cItems.length) groups.push({ label: '该角色聊天', icon: 'fa-comments', cat: 'chat', ...scan(cItems, query, opts) });
     }
     if (scopes.charAll) {
         const items = await getAllCharacterFields((d, t) => onProgress && onProgress(`加载角色卡 ${d}/${t}`));
-        groups.push({ label: '全部角色卡', icon: 'fa-users', ...scan(items, query, opts) });
+        groups.push({ label: '全部角色卡', icon: 'fa-users', cat: 'char', ...scan(items, query, opts) });
     }
     if (scopes.chat) {
-        groups.push({ label: '当前聊天', icon: 'fa-comment', ...scan(getChatMessages(), query, opts) });
+        groups.push({ label: '当前聊天', icon: 'fa-comment', cat: 'chat', ...scan(getChatMessages(), query, opts) });
     }
     if (scopes.chatAll) {
         const items = await getAllChatItems((d, t) => onProgress && onProgress(`扫描聊天 ${d}/${t}`));
-        groups.push({ label: '全部聊天', icon: 'fa-comments', ...scan(items, query, opts) });
+        groups.push({ label: '全部聊天', icon: 'fa-comments', cat: 'chat', ...scan(items, query, opts) });
     }
     return groups;
 }
@@ -371,6 +458,7 @@ const PANEL_HTML = `
   </div>
   <div class="kwsearch-helpbox" hidden>正则模式：把关键词当成「正则表达式」来匹配，可用符号做高级/模糊搜索。例如 <code>女(性|权)</code> 同时匹配「女性」和「女权」，<code>\\d+</code> 匹配任意数字。不清楚就别勾，保持普通文字搜索即可。</div>
   <div class="kwsearch-summary"></div>
+  <div class="kwsearch-tabs"></div>
   <div class="kwsearch-results"></div>
  </div>
 </div>`;
@@ -410,46 +498,70 @@ function applyTheme(panel, key) {
     }
 }
 
+const KW_CATS = [['preset', '预设条目'], ['char', '角色卡'], ['wi', '世界书'], ['chat', '聊天记录']];
+
+function applyTab(panel, cat) {
+    panel.querySelectorAll('.kwsearch-group').forEach(g => {
+        g.style.display = (cat === 'all' || g.dataset.cat === cat) ? '' : 'none';
+    });
+    panel.querySelectorAll('.kws-tab').forEach(t => t.classList.toggle('on', t.dataset.cat === cat));
+}
+
 function renderResults(panel, groups, query) {
     const summary = panel.querySelector('.kwsearch-summary');
+    const tabsBox = panel.querySelector('.kwsearch-tabs');
     const box = panel.querySelector('.kwsearch-results');
     const grand = groups.reduce((a, g) => a + g.total, 0);
     const hits = groups.reduce((a, g) => a + g.results.length, 0);
     summary.innerHTML = `关键词 “<b>${esc(query)}</b>” 共出现 <b>${grand}</b> 次，分布在 <b>${hits}</b> 个条目中。`;
 
+    // 只显示有结果的分组
+    const shown = groups.filter(g => g.results.length > 0);
+
+    // 分类标签卡：仅出现有结果的类别
+    const present = KW_CATS.filter(([k]) => shown.some(g => g.cat === k));
+    if (present.length > 0) {
+        let th = `<button class="kws-tab on" data-cat="all">全部</button>`;
+        for (const [k, name] of present) {
+            const n = shown.filter(g => g.cat === k).reduce((a, g) => a + g.results.length, 0);
+            th += `<button class="kws-tab" data-cat="${k}">${name} <span class="kws-tab-n">${n}</span></button>`;
+        }
+        tabsBox.innerHTML = th;
+    } else {
+        tabsBox.innerHTML = '';
+    }
+
     const jumps = [];
     let html = '';
-    for (const g of groups) {
-        html += `<div class="kwsearch-group">
+    for (const g of shown) {
+        html += `<div class="kwsearch-group" data-cat="${g.cat}">
           <div class="kwsearch-group-head"><i class="fa-solid ${g.icon}"></i> ${g.label}
             <span class="kwsearch-badge">${g.total} 次 / ${g.results.length} 条</span></div>`;
-        if (!g.results.length) {
-            html += `<div class="kwsearch-empty">无匹配</div>`;
-        } else {
-            for (const r of g.results) {
-                let attr = '';
-                if (r.jump) {
-                    attr = ` data-jump="${jumps.length}" title="点击跳转到该位置"`;
-                    jumps.push(r.jump);
-                }
-                html += `<div class="kwsearch-item${r.jump ? ' kwsearch-clickable' : ''}"${attr}>
-                  <div class="kwsearch-item-head">
-                    <span class="kwsearch-title">${esc(r.title)}${r.jump ? ' <i class="fa-solid fa-arrow-right-to-bracket kwsearch-jump-icon"></i>' : ''}</span>
-                    <span class="kwsearch-count">×${r.count}</span>
-                  </div>`;
-                for (const s of r.snippets) {
-                    html += `<div class="kwsearch-snip">${s.truncStart ? '…' : ''}${esc(s.before)}<mark>${esc(s.match)}</mark>${esc(s.after)}${s.truncEnd ? '…' : ''}</div>`;
-                }
-                if (r.count > r.snippets.length) {
-                    html += `<div class="kwsearch-more">还有 ${r.count - r.snippets.length} 处未显示</div>`;
-                }
-                html += `</div>`;
+        for (const r of g.results) {
+            let attr = '';
+            if (r.jump) {
+                attr = ` data-jump="${jumps.length}" title="点击跳转到该位置"`;
+                jumps.push(r.jump);
             }
+            html += `<div class="kwsearch-item${r.jump ? ' kwsearch-clickable' : ''}"${attr}>
+              <div class="kwsearch-item-head">
+                <span class="kwsearch-title">${esc(r.title)}${r.jump ? ' <i class="fa-solid fa-arrow-right-to-bracket kwsearch-jump-icon"></i>' : ''}</span>
+                <span class="kwsearch-count">×${r.count}</span>
+              </div>`;
+            for (const s of r.snippets) {
+                html += `<div class="kwsearch-snip">${s.truncStart ? '…' : ''}${esc(s.before)}<mark>${esc(s.match)}</mark>${esc(s.after)}${s.truncEnd ? '…' : ''}</div>`;
+            }
+            if (r.count > r.snippets.length) {
+                html += `<div class="kwsearch-more">还有 ${r.count - r.snippets.length} 处未显示</div>`;
+            }
+            html += `</div>`;
         }
         html += `</div>`;
     }
+    if (!shown.length) html = `<div class="kwsearch-empty">没有找到匹配的内容</div>`;
     box.innerHTML = html;
     panel._kwJumps = jumps;
+    applyTab(panel, 'all');
 }
 
 let kwSearching = false;
@@ -481,6 +593,7 @@ async function doSearch(panel) {
         saveLastState(query, scopes, opts);
         kwLastGroups = groups;
         kwLastQuery = query;
+        kwLastOpts = opts;
         renderHistory(panel);
     } catch (e) {
         summary.innerHTML = `<span class="kwsearch-error">${esc(e.message)}</span>`;
@@ -565,17 +678,59 @@ function jumpTo(jump, panel) {
 async function doJump(jump) {
     switch (jump.type) {
         case 'chat': return jumpChat(jump.mesid);
+        case 'chatfile': return jumpChatFile(jump.file, jump.mesid);
         case 'wi': return jumpWorldInfo(jump.book, jump.uid);
         case 'preset': return jumpPreset(jump.identifier, jump.name);
         case 'char': return jumpChar(jump.field);
     }
 }
 
-function jumpChat(mesid) {
-    const el = document.querySelector(`.mes[mesid="${mesid}"]`);
+// 确保目标楼层已渲染（懒加载/高处/隐藏楼层先补出来）
+async function ensureMessageRendered(mesid) {
+    const sel = `.mes[mesid="${mesid}"]`;
+    let el = document.querySelector(sel);
+    if (el) return el;
+    // 一次性把更早的楼层全部补出来
+    try {
+        const m = await import('/script.js');
+        if (typeof m.showMoreMessages === 'function') await m.showMoreMessages(Number.MAX_SAFE_INTEGER);
+    } catch (e) { console.warn(`[${EXT_ID}] showMoreMessages 调用失败，改用按钮`, e); }
+    el = document.querySelector(sel);
+    if (el) return el;
+    // 兜底：反复点「显示更多消息」按钮
+    for (let i = 0; i < 40 && !el; i++) {
+        const btn = document.getElementById('show_more_messages');
+        if (!btn) break;
+        btn.click();
+        await waitFor(() => document.querySelector(sel) || !document.getElementById('show_more_messages'), 350);
+        el = document.querySelector(sel);
+    }
+    return el;
+}
+
+async function jumpChat(mesid) {
+    const el = await ensureMessageRendered(mesid);
     if (!el) { kwToast('没找到这条消息（可能已不在当前聊天）', 'warning'); return; }
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     flash(el);
+}
+
+// 跳到该角色某个聊天存档的具体楼层（非当前存档先打开，再定位楼层）
+async function jumpChatFile(file, mesid) {
+    const c = ctx();
+    const cur = (typeof c.getCurrentChatId === 'function') ? c.getCurrentChatId() : null;
+    if (cur !== file) {
+        if (typeof c.openCharacterChat !== 'function') { kwToast('未能打开该聊天存档', 'warning'); return; }
+        try { await c.openCharacterChat(file); }
+        catch (e) { console.warn(`[${EXT_ID}] 打开聊天存档失败`, file, e); kwToast('未能打开该聊天存档', 'warning'); return; }
+        await waitFor(() => (typeof c.getCurrentChatId === 'function' ? c.getCurrentChatId() === file : true), 5000);
+        await waitFor(() => document.querySelector('.mes[mesid]'), 3000); // 等新聊天渲染
+    }
+    if (typeof mesid === 'number') {
+        const el = await ensureMessageRendered(mesid);
+        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flash(el); return; }
+    }
+    kwToast('已打开该聊天存档（未定位到具体楼层）', 'info');
 }
 
 async function jumpWorldInfo(book, uid) {
@@ -651,18 +806,56 @@ const CHAR_ADV_FIELDS = {
     post_history: '#post_history_instructions_textarea, #post_history_instructions',
 };
 
+// 在文本框内定位到第一处匹配：选中并滚动到那一行
+function locateInField(el, query, opts) {
+    if (!el || !query) return;
+    try {
+        const text = (el.value != null) ? el.value : '';
+        let idx = -1, len = query.length;
+        try {
+            const re = buildRegex(query, opts || {});
+            re.lastIndex = 0;
+            const m = re.exec(text);
+            if (m) { idx = m.index; len = m[0].length || query.length; }
+        } catch (e) { idx = -1; }
+        if (idx < 0) {
+            const cs = opts && opts.caseSensitive;
+            const hay = cs ? text : text.toLowerCase();
+            const needle = cs ? query : query.toLowerCase();
+            idx = hay.indexOf(needle);
+            len = query.length;
+        }
+        if (idx < 0) return;
+        el.focus();
+        try { el.setSelectionRange(idx, idx + len); } catch (e) { /* ignore */ }
+        const line = text.slice(0, idx).split('\n').length - 1;
+        const style = getComputedStyle(el);
+        let lh = parseFloat(style.lineHeight);
+        if (!lh || isNaN(lh)) lh = (parseFloat(style.fontSize) || 14) * 1.4;
+        el.scrollTop = Math.max(0, line * lh - el.clientHeight / 2);
+    } catch (e) { console.warn(`[${EXT_ID}] 字段内定位失败`, e); }
+}
+
 async function jumpChar(field) {
     const $ = window.jQuery;
-    // 主面板字段
+    // 主面板字段（描述 / 开场白）——必要时先打开右侧角色面板
     if (CHAR_MAIN_FIELDS[field]) {
-        const el = document.querySelector(CHAR_MAIN_FIELDS[field]);
-        if (el && el.offsetParent !== null) {
+        let el = document.querySelector(CHAR_MAIN_FIELDS[field]);
+        if (!el || el.offsetParent === null) {
+            const icon = document.getElementById('rightNavDrawerIcon');
+            if (icon && $ && !$('#right-nav-panel').is(':visible')) icon.click();
+            el = await waitFor(() => {
+                const e = document.querySelector(CHAR_MAIN_FIELDS[field]);
+                return (e && e.offsetParent !== null) ? e : null;
+            }, 3000);
+        }
+        if (el) {
             el.scrollIntoView({ behavior: 'smooth', block: 'center' });
             flash(el);
-            try { el.focus(); } catch (e) { /* ignore */ }
+            locateInField(el, kwLastQuery, kwLastOpts);
             return;
         }
-        kwToast('请在角色卡面板中查看该字段', 'info');
+        kwToast('请在角色面板中查看该字段', 'info');
         return;
     }
     // 高级定义弹窗字段
@@ -676,7 +869,7 @@ async function jumpChar(field) {
     if (!el) { kwToast('已打开角色高级定义，请查找该字段', 'info'); return; }
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     flash(el);
-    try { el.focus(); } catch (e) { /* ignore */ }
+    locateInField(el, kwLastQuery, kwLastOpts);
 }
 
 function buildPanel(prefill) {
@@ -741,6 +934,12 @@ function buildPanel(prefill) {
     const help = panel.querySelector('.kws-help');
     const helpbox = panel.querySelector('.kwsearch-helpbox');
     help.addEventListener('click', () => { helpbox.hidden = !helpbox.hidden; });
+
+    // 分类标签卡筛选
+    panel.querySelector('.kwsearch-tabs').addEventListener('click', (e) => {
+        const t = e.target.closest('.kws-tab');
+        if (t) applyTab(panel, t.dataset.cat);
+    });
 
     return panel;
 }

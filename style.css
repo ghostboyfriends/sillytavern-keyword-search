@@ -89,6 +89,17 @@
 .kwsearch-summary b{color:var(--accent)}
 .kwsearch-error{color:var(--warning,#e57373)}
 
+/* ===== 分类标签卡 ===== */
+.kwsearch-tabs{display:flex;flex-wrap:wrap;gap:8px}
+.kwsearch-tabs:empty{display:none}
+.kws-tab{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;font-size:13px;border-radius:13px;cursor:pointer;color:var(--ink);border:1px solid var(--line);background:color-mix(in srgb,var(--ink) 5%,transparent);box-shadow:inset 0 1px 0 rgba(255,255,255,.1);transition:transform .12s,box-shadow .12s,background .15s,color .15s,border-color .15s}
+.kws-tab:hover{border-color:var(--accent);transform:translateY(-1px)}
+.kws-tab:active{transform:translateY(1px)}
+.kws-tab.on{color:var(--goText);font-weight:600;border-color:transparent;background:linear-gradient(150deg,var(--accent2),var(--accent));box-shadow:0 3px 12px color-mix(in srgb,var(--accent) 38%,transparent),inset 0 1px 0 rgba(255,255,255,.4)}
+.kws-tab-n{font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;background:color-mix(in srgb,var(--ink) 12%,transparent)}
+.kws-tab.on .kws-tab-n{background:color-mix(in srgb,var(--goText) 22%,transparent)}
+.kwsearch-panel[data-theme=follow] .kws-tab.on{color:var(--ink);background:color-mix(in srgb,var(--accent) 28%,transparent);border:1px solid var(--accent)}
+
 /* ===== 结果 ===== */
 .kwsearch-results{overflow-y:auto;max-height:48vh;padding-right:4px}
 .kwsearch-results::-webkit-scrollbar{width:8px}
