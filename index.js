@@ -87,6 +87,40 @@ function getPresetPrompts() {
     return [];
 }
 
+// 取对话补全预设管理器
+function getOpenAIPresetManager() {
+    const c = ctx();
+    if (typeof c.getPresetManager !== 'function') return null;
+    try { return c.getPresetManager('openai') || c.getPresetManager(); }
+    catch (e) { try { return c.getPresetManager(); } catch (e2) { return null; } }
+}
+
+// 全部预设的条目（只读，不切换预设）
+function getAllPresetItems() {
+    const pm = getOpenAIPresetManager();
+    if (!pm || typeof pm.getAllPresets !== 'function' || typeof pm.getCompletionPresetByName !== 'function') {
+        console.warn(`[${EXT_ID}] 预设管理器不可用，无法搜索全部预设`);
+        return [];
+    }
+    const names = pm.getAllPresets() || [];
+    const cur = (typeof pm.getSelectedPresetName === 'function') ? pm.getSelectedPresetName() : null;
+    const out = [];
+    for (const name of names) {
+        let preset;
+        try { preset = pm.getCompletionPresetByName(name); } catch (e) { preset = null; }
+        const prompts = (preset && Array.isArray(preset.prompts)) ? preset.prompts : [];
+        for (const p of prompts) {
+            if (!p || p.marker || !p.content) continue;
+            out.push({
+                title: `${name} · ${p.name || p.identifier || '(未命名条目)'}`,
+                content: `${p.content}`,
+                jump: { type: 'presetAll', preset: name, identifier: p.identifier, name: p.name, isCurrent: name === cur },
+            });
+        }
+    }
+    return out;
+}
+
 // 全部世界书条目（遍历所有 lorebook）
 async function getWorldInfoEntries() {
     const c = ctx();
@@ -401,6 +435,10 @@ async function runSearch(query, scopes, opts, onProgress) {
         const items = await getAllChatItems((d, t) => onProgress && onProgress(`扫描聊天 ${d}/${t}`));
         groups.push({ label: '全部聊天', icon: 'fa-comments', cat: 'chat', ...scan(items, query, opts) });
     }
+    if (scopes.presetAll) {
+        onProgress && onProgress('读取全部预设…');
+        groups.push({ label: '全部预设', icon: 'fa-layer-group', cat: 'preset', ...scan(getAllPresetItems(), query, opts) });
+    }
     return groups;
 }
 
@@ -446,6 +484,7 @@ const PANEL_HTML = `
   </div>
   <div class="kwsearch-scopes kwsearch-global">
     <span class="kwsearch-scope-tag">全局</span>
+    <label><input type="checkbox" data-scope="presetAll"> 全部预设</label>
     <label><input type="checkbox" data-scope="charAll"> 全部角色卡</label>
     <label><input type="checkbox" data-scope="chatAll"> 全部聊天</label>
     <span class="kwsearch-hint">需扫描磁盘，较慢</span>
@@ -681,6 +720,7 @@ async function doJump(jump) {
         case 'chatfile': return jumpChatFile(jump.file, jump.mesid);
         case 'wi': return jumpWorldInfo(jump.book, jump.uid);
         case 'preset': return jumpPreset(jump.identifier, jump.name);
+        case 'presetAll': return jumpPresetGlobal(jump);
         case 'char': return jumpChar(jump.field);
     }
 }
@@ -794,6 +834,114 @@ async function jumpPreset(identifier, name) {
     flash(item);
     const action = item.querySelector('.prompt-manager-edit-action') || item.querySelector('.prompt-manager-inspect-action');
     if (action) action.click();
+}
+
+// 把文本里的匹配高亮（转义安全）
+function highlightHtml(text, query, opts) {
+    if (!query) return esc(text);
+    let re;
+    try { re = buildRegex(query, opts || {}); } catch (e) { return esc(text); }
+    re.lastIndex = 0;
+    let out = '', last = 0, m, guard = 0;
+    while ((m = re.exec(text)) !== null && guard++ < 8000) {
+        if (m.index < last) { re.lastIndex = last + 1; continue; }
+        out += esc(text.slice(last, m.index)) + '<mark>' + esc(m[0]) + '</mark>';
+        last = m.index + (m[0].length || 0);
+        if (m[0].length === 0) re.lastIndex++;
+    }
+    out += esc(text.slice(last));
+    return out;
+}
+
+// 跳转到「全部预设」里的条目
+async function jumpPresetGlobal(jump) {
+    const pm = getOpenAIPresetManager();
+    if (!pm) { kwToast('未找到预设管理器，无法跳转', 'warning'); return; }
+    const curName = (typeof pm.getSelectedPresetName === 'function') ? pm.getSelectedPresetName() : null;
+    // 已是当前预设：直接在原生编辑器中定位
+    if (jump.preset === curName) { return jumpPreset(jump.identifier, jump.name); }
+    // 其它预设：默认只读查看，不切换
+    return showPresetEntryViewer(jump);
+}
+
+// 只读查看其它预设的某条条目内容（不切换预设）
+function showPresetEntryViewer(jump) {
+    const c = ctx();
+    const pm = getOpenAIPresetManager();
+    let content = '', role = '';
+    try {
+        const preset = pm && pm.getCompletionPresetByName(jump.preset);
+        const p = (preset && Array.isArray(preset.prompts)) ? preset.prompts.find(x => x.identifier === jump.identifier) : null;
+        if (p) { content = `${p.content || ''}`; role = p.role || ''; }
+    } catch (e) { console.warn(`[${EXT_ID}] 读取预设条目失败`, e); }
+
+    const html = `<div class="kwsearch-panel kwv-panel" data-theme="${esc(resolveTheme(getTheme()))}">
+      <div class="kwsearch-glass">
+        <div class="kwv-head">
+          <span class="kwv-preset"><i class="fa-solid fa-layer-group"></i> ${esc(jump.preset)}</span>
+          <span class="kwv-name">${esc(jump.name || jump.identifier)}</span>
+          ${role ? `<span class="kwv-role">${esc(role)}</span>` : ''}
+          <button class="kwv-close" title="关闭"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="kwv-body">${content ? highlightHtml(content, kwLastQuery, kwLastOpts) : '<span class="kwv-empty">（该条目无内容或未找到）</span>'}</div>
+        <div class="kwv-actions">
+          <button class="kwv-switch"><i class="fa-solid fa-arrow-right-arrow-left"></i> 切换到此预设并编辑</button>
+        </div>
+      </div>
+    </div>`;
+
+    try {
+        c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true, okButton: '关闭' });
+    } catch (e) {
+        console.warn(`[${EXT_ID}] 打开查看器失败`, e);
+        kwToast('打开查看器失败', 'warning');
+        return;
+    }
+    // 渲染后绑定按钮
+    setTimeout(() => {
+        const sw = document.querySelector('.kwv-switch');
+        const cl = document.querySelector('.kwv-close');
+        const closePopup = (el) => {
+            const dlg = el && el.closest('dialog');
+            const ok = dlg && (dlg.querySelector('.popup-button-ok') || dlg.querySelector('.popup-button-close'));
+            if (ok) ok.click();
+        };
+        if (cl) cl.addEventListener('click', () => closePopup(cl), { once: true });
+        if (sw) sw.addEventListener('click', async () => { closePopup(sw); await switchPresetThenJump(jump); }, { once: true });
+    }, 60);
+}
+
+// 询问是否保存当前预设 → 切换 → 定位（真正会改动当前预设的路径）
+async function switchPresetThenJump(jump) {
+    const c = ctx();
+    const pm = getOpenAIPresetManager();
+    if (!pm) { kwToast('未找到预设管理器', 'warning'); return; }
+    const curName = (typeof pm.getSelectedPresetName === 'function') ? pm.getSelectedPresetName() : null;
+    if (jump.preset === curName) { return jumpPreset(jump.identifier, jump.name); }
+
+    let choice = null;
+    try {
+        const msg = `切换到预设「<b>${esc(jump.preset)}</b>」才能在编辑器中打开这条。<br><br>`
+            + `当前预设「<b>${esc(curName || '未知')}</b>」<b>未保存的修改将会丢失</b>。要先保存吗？`;
+        choice = await c.callGenericPopup(msg, c.POPUP_TYPE.CONFIRM, '', {
+            okButton: '不保存，直接切换',
+            cancelButton: '取消',
+            customButtons: [{ text: '保存当前并切换', result: 2 }],
+        });
+    } catch (e) { console.warn(`[${EXT_ID}] 预设切换确认弹窗失败`, e); return; }
+    if (!choice) return; // 0/null 取消
+    if (choice === 2) {
+        try { await pm.updatePreset(); }
+        catch (e) { console.warn(`[${EXT_ID}] 保存当前预设失败`, e); kwToast('保存当前预设失败，已取消切换', 'warning'); return; }
+    }
+    try {
+        const val = pm.findPreset(jump.preset);
+        if (val === undefined || val === null) { kwToast('未找到目标预设', 'warning'); return; }
+        pm.selectPreset(val);
+    } catch (e) { console.warn(`[${EXT_ID}] 切换预设失败`, e); kwToast('切换预设失败', 'warning'); return; }
+    await waitFor(() => (typeof pm.getSelectedPresetName === 'function' && pm.getSelectedPresetName() === jump.preset), 6000);
+    await new Promise(r => setTimeout(r, 300));
+    return jumpPreset(jump.identifier, jump.name);
 }
 
 const CHAR_MAIN_FIELDS = { description: '#description_textarea', first_mes: '#firstmessage_textarea' };

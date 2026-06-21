@@ -144,3 +144,23 @@
 @media (prefers-reduced-motion:reduce){
   .kwsearch-glass *,.kwsearch-group,.kwsearch-flash{animation:none!important;transition:none!important}
 }
+
+/* ===== 其它预设条目·只读查看器（复用主面板玻璃 + 主题色） ===== */
+.kwv-panel{width:min(620px,100%)}
+.kwv-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.kwv-preset{display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--accent)}
+.kwv-name{font-weight:600;color:var(--ink)}
+.kwv-role{font-size:11px;letter-spacing:.5px;text-transform:uppercase;padding:2px 8px;border-radius:999px;color:var(--ink);background:color-mix(in srgb,var(--accent) 22%,transparent)}
+.kwv-close{margin-left:auto;width:24px;height:24px;border-radius:50%;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:13px;transition:color .12s,border-color .12s}
+.kwv-close:hover{color:var(--ink);border-color:var(--ink)}
+.kwv-body{white-space:pre-wrap;word-break:break-word;line-height:1.7;font-size:14px;color:var(--ink);max-height:56vh;overflow-y:auto;padding:14px;border-radius:12px;background:var(--inputBg);box-shadow:inset 0 2px 6px rgba(0,0,0,.14)}
+.kwv-body::-webkit-scrollbar{width:8px}
+.kwv-body::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+.kwv-body::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+.kwv-body mark{color:var(--ink);background:color-mix(in srgb,var(--accent) 34%,transparent);border-radius:4px;padding:0 4px;box-shadow:0 0 8px color-mix(in srgb,var(--accent) 28%,transparent)}
+.kwv-empty{opacity:.55;font-style:italic}
+.kwv-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.kwv-switch{display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border:none;border-radius:999px;cursor:pointer;font-size:13px;font-weight:600;color:var(--goText);background:linear-gradient(150deg,var(--accent2),var(--accent));box-shadow:0 4px 16px color-mix(in srgb,var(--accent) 40%,transparent),inset 0 1px 0 rgba(255,255,255,.5);transition:transform .12s,filter .12s}
+.kwv-switch:hover{filter:brightness(1.06);transform:translateY(-1px)}
+.kwv-switch:active{transform:translateY(1px)}
+.kwsearch-panel[data-theme=follow] .kwv-switch{color:var(--ink);background:color-mix(in srgb,var(--accent) 28%,transparent);border:1px solid var(--accent)}
