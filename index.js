@@ -481,21 +481,27 @@ const PANEL_HTML = `
     <label><input type="checkbox" data-scope="world" checked> 世界书</label>
     <label><input type="checkbox" data-scope="char"> 当前角色卡</label>
     <label><input type="checkbox" data-scope="chat"> 当前聊天</label>
+    <button class="kws-more-scopes" title="全局范围（需扫描磁盘，较慢）">全局 <i class="fa-solid fa-chevron-down"></i></button>
   </div>
-  <div class="kwsearch-scopes kwsearch-global">
-    <span class="kwsearch-scope-tag">全局</span>
+  <div class="kwsearch-scopes kwsearch-global" hidden>
     <label><input type="checkbox" data-scope="presetAll"> 全部预设</label>
     <label><input type="checkbox" data-scope="charAll"> 全部角色卡</label>
     <label><input type="checkbox" data-scope="chatAll"> 全部聊天</label>
-    <span class="kwsearch-hint">需扫描磁盘，较慢</span>
+    <span class="kwsearch-hint">扫描磁盘，较慢</span>
   </div>
   <div class="kwsearch-opts">
     <label><input type="checkbox" class="kws-case"> 区分大小写</label>
     <label><input type="checkbox" class="kws-regex"> 正则模式</label>
     <button class="kws-help" title="正则模式说明">?</button>
+    <button class="kws-replace-toggle" title="查找替换"><i class="fa-solid fa-right-left"></i> 替换</button>
     <button class="kws-go"><i class="fa-solid fa-magnifying-glass"></i>搜索</button>
   </div>
   <div class="kwsearch-helpbox" hidden>正则模式：把关键词当成「正则表达式」来匹配，可用符号做高级/模糊搜索。例如 <code>女(性|权)</code> 同时匹配「女性」和「女权」，<code>\\d+</code> 匹配任意数字。不清楚就别勾，保持普通文字搜索即可。</div>
+  <div class="kwsearch-replace" hidden>
+    <input type="text" class="kws-replace" placeholder="替换为…（留空＝删除该词）" />
+    <button class="kws-replace-go"><i class="fa-solid fa-list-check"></i> 查找可替换项</button>
+    <div class="kws-replace-hint"><i class="fa-solid fa-triangle-exclamation"></i> 替换只作用于已勾选的「当前预设 / 当前聊天 / 当前角色卡」，会直接改并保存数据，建议先备份。</div>
+  </div>
   <div class="kwsearch-summary"></div>
   <div class="kwsearch-tabs"></div>
   <div class="kwsearch-results"></div>
@@ -604,6 +610,246 @@ function renderResults(panel, groups, query) {
 }
 
 let kwSearching = false;
+
+/* ---------- 查找替换（仅当前预设 / 当前聊天 / 当前角色卡，可勾选目标） ---------- */
+function countMatches(text, query, opts) {
+    try { return (`${text}`.match(buildRegex(query, opts)) || []).length; }
+    catch (e) { return 0; }
+}
+
+// 角色卡可替换字段（保存依赖酒馆自身：写入文本框 + 触发 input）
+function collectCharReplaceTargets(ch) {
+    if (!ch) return [];
+    const d = ch.data || {};
+    const T = [];
+    const add = (selector, value, apply) => {
+        if (value == null || value === '') return;
+        T.push({ selector, value: `${value}`, apply });
+    };
+    add('#description_textarea', ch.description != null ? ch.description : d.description, v => { ch.description = v; if (ch.data) ch.data.description = v; });
+    add('#firstmessage_textarea', ch.first_mes != null ? ch.first_mes : d.first_mes, v => { ch.first_mes = v; if (ch.data) ch.data.first_mes = v; });
+    add('#personality_textarea', ch.personality != null ? ch.personality : d.personality, v => { ch.personality = v; if (ch.data) ch.data.personality = v; });
+    add('#scenario_pole', ch.scenario != null ? ch.scenario : d.scenario, v => { ch.scenario = v; if (ch.data) ch.data.scenario = v; });
+    add('#mes_example_textarea', ch.mes_example != null ? ch.mes_example : d.mes_example, v => { ch.mes_example = v; if (ch.data) ch.data.mes_example = v; });
+    add('#creator_notes_textarea', d.creator_notes != null ? d.creator_notes : ch.creatorcomment, v => { if (ch.data) ch.data.creator_notes = v; ch.creatorcomment = v; });
+    add('#system_prompt_textarea', d.system_prompt, v => { if (ch.data) ch.data.system_prompt = v; });
+    return T;
+}
+
+const CHAR_FIELD_LABEL = {
+    '#description_textarea': '角色描述',
+    '#firstmessage_textarea': '开场白',
+    '#personality_textarea': '性格',
+    '#scenario_pole': '场景',
+    '#mes_example_textarea': '对话示例',
+    '#creator_notes_textarea': '作者注释',
+    '#system_prompt_textarea': '主提示词',
+};
+const REPLACE_SRC_LABEL = { preset: '预设', chat: '聊天', char: '角色卡' };
+
+// 取第一处匹配的高亮片段
+function makeSnippet(text, query, opts) {
+    const raw = `${text}`;
+    try {
+        const re = buildRegex(query, opts); re.lastIndex = 0;
+        const m = re.exec(raw);
+        if (!m) return esc(raw.slice(0, 90));
+        const i = m.index, len = m[0].length || query.length;
+        const s = Math.max(0, i - 30), e = Math.min(raw.length, i + len + 50);
+        return (s > 0 ? '…' : '') + esc(raw.slice(s, i)) + '<mark>' + esc(m[0]) + '</mark>' + esc(raw.slice(i + len, e)) + (e < raw.length ? '…' : '');
+    } catch (e) { return esc(raw.slice(0, 90)); }
+}
+
+// 主题化确认框（玻璃面板，跟随主面板配色）。buttons: [{text, value, primary, danger}]
+function kwThemedConfirm(htmlBody, buttons) {
+    const c = ctx();
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (v) => { if (settled) return; settled = true; resolve(v); };
+        const theme = esc(resolveTheme(getTheme()));
+        const btnHtml = buttons.map((b, i) => `<button class="kwc-btn${b.primary ? ' kwc-primary' : ''}${b.danger ? ' kwc-danger' : ''}" data-i="${i}">${esc(b.text)}</button>`).join('');
+        const html = `<div class="kwsearch-panel kwc-panel" data-theme="${theme}"><div class="kwsearch-glass"><div class="kwc-body">${htmlBody}</div><div class="kwc-actions">${btnHtml}</div></div></div>`;
+        try {
+            Promise.resolve(c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', { allowVerticalScrolling: true, okButton: '确定' }))
+                .then(() => finish(undefined)).catch(() => finish(undefined));
+        } catch (e) { finish(undefined); return; }
+        setTimeout(() => {
+            const wrap = document.querySelector('.kwc-panel');
+            if (!wrap) return;
+            const closeDlg = () => {
+                const dlg = wrap.closest('dialog');
+                const b = dlg && (dlg.querySelector('.popup-button-ok') || dlg.querySelector('.popup-button-close'));
+                if (b) b.click();
+            };
+            wrap.querySelectorAll('.kwc-btn').forEach((btn) => {
+                btn.addEventListener('click', () => { finish(buttons[+btn.dataset.i].value); closeDlg(); }, { once: true });
+            });
+        }, 60);
+    });
+}
+
+// 收集可替换目标（每个预设条目 / 每条消息 / 每个角色卡字段为一项）
+function buildReplaceTargets(query, opts, scopes) {
+    const c = ctx();
+    const targets = [];
+    if (scopes.preset) {
+        getPresetPrompts().forEach(p => {
+            if (!p || p.marker || !p.content) return;
+            const cnt = countMatches(p.content, query, opts);
+            if (cnt) targets.push({ source: 'preset', key: p.identifier, title: p.name || p.identifier || '(未命名条目)', count: cnt, text: `${p.content}` });
+        });
+    }
+    if (scopes.chat) {
+        (c.chat || []).forEach((m, i) => {
+            if (!m || typeof m.mes !== 'string') return;
+            const cnt = countMatches(m.mes, query, opts);
+            if (cnt) targets.push({ source: 'chat', key: i, title: `#${i} ${m.is_user ? (c.name1 || 'You') : (m.name || '')}`.trim(), count: cnt, text: m.mes });
+        });
+    }
+    if (scopes.char) {
+        const ch = (c.characters || [])[c.characterId];
+        if (ch) collectCharReplaceTargets(ch).forEach(t => {
+            const cnt = countMatches(t.value, query, opts);
+            if (cnt) targets.push({ source: 'char', key: t.selector, title: CHAR_FIELD_LABEL[t.selector] || t.selector, count: cnt, text: t.value, _apply: t.apply, _selector: t.selector });
+        });
+    }
+    return targets;
+}
+
+// 执行替换（按来源分组保存）
+async function applyReplaceTargets(chosen, query, replacement, opts) {
+    const c = ctx();
+    let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false;
+    for (const t of chosen) {
+        if (t.source === 'preset') {
+            const p = getPresetPrompts().find(x => x.identifier === t.key);
+            if (p && p.content) {
+                const cnt = countMatches(p.content, query, opts);
+                if (cnt) { p.content = `${p.content}`.replace(buildRegex(query, opts), replacement); done += cnt; presetDirty = true; }
+            }
+        } else if (t.source === 'chat') {
+            const m = (c.chat || [])[t.key];
+            if (m && typeof m.mes === 'string') {
+                const cnt = countMatches(m.mes, query, opts);
+                if (cnt) {
+                    m.mes = m.mes.replace(buildRegex(query, opts), replacement);
+                    if (Array.isArray(m.swipes) && typeof m.swipe_id === 'number' && m.swipes[m.swipe_id] != null) m.swipes[m.swipe_id] = m.mes;
+                    done += cnt; chatDirty = true;
+                    if (typeof c.updateMessageBlock === 'function') { try { c.updateMessageBlock(t.key, m); } catch (e) { /* ignore */ } }
+                }
+            }
+        } else if (t.source === 'char') {
+            const cnt = countMatches(t.text, query, opts);
+            const el = document.querySelector(t._selector);
+            if (!el) { charSkipped += cnt; continue; }
+            const nv = `${t.text}`.replace(buildRegex(query, opts), replacement);
+            if (typeof t._apply === 'function') t._apply(nv);
+            el.value = nv;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            done += cnt;
+        }
+    }
+    if (presetDirty) {
+        try { if (typeof c.saveSettingsDebounced === 'function') c.saveSettingsDebounced(); } catch (e) { /* ignore */ }
+        const pm = getOpenAIPresetManager();
+        try { if (pm && typeof pm.updatePreset === 'function') await pm.updatePreset(); } catch (e) { console.warn(`[${EXT_ID}] 保存当前预设失败`, e); }
+        try { const oai = await import('/scripts/openai.js'); if (oai && oai.promptManager && typeof oai.promptManager.render === 'function') oai.promptManager.render(); } catch (e) { /* ignore */ }
+    }
+    if (chatDirty) { try { if (typeof c.saveChat === 'function') await c.saveChat(); } catch (e) { console.warn(`[${EXT_ID}] 保存聊天失败`, e); } }
+    return { done, charSkipped };
+}
+
+// 点「查找可替换项」：收集目标并渲染勾选列表
+function startReplaceFlow(panel) {
+    if (kwSearching) return;
+    const query = panel.querySelector('.kws-input').value.trim();
+    if (!query) { kwToast('请先在上方输入要替换的关键词', 'warning'); return; }
+    const replacement = panel.querySelector('.kws-replace') ? panel.querySelector('.kws-replace').value : '';
+    const opts = {
+        caseSensitive: panel.querySelector('.kws-case').checked,
+        regex: panel.querySelector('.kws-regex').checked,
+    };
+    const scopes = {};
+    panel.querySelectorAll('[data-scope]').forEach(cb => { scopes[cb.dataset.scope] = cb.checked; });
+    if (!scopes.preset && !scopes.chat && !scopes.char) {
+        kwToast('替换只支持「当前预设 / 当前聊天 / 当前角色卡」，请先勾选其中至少一个', 'info');
+        return;
+    }
+    const targets = buildReplaceTargets(query, opts, scopes);
+    if (!targets.length) { kwToast('这些范围里没有可替换的匹配', 'info'); return; }
+    panel._kwReplaceTargets = targets;
+    panel._kwReplaceCtx = { query, replacement, opts };
+    renderReplaceList(panel, targets);
+}
+
+function renderReplaceList(panel, targets) {
+    const summary = panel.querySelector('.kwsearch-summary');
+    const tabs = panel.querySelector('.kwsearch-tabs');
+    const box = panel.querySelector('.kwsearch-results');
+    const totalHits = targets.reduce((a, t) => a + t.count, 0);
+    const { query, replacement, opts } = panel._kwReplaceCtx;
+    summary.innerHTML = `替换预览：勾选要替换的目标，共 <b>${targets.length}</b> 项 / <b>${totalHits}</b> 处`;
+    tabs.innerHTML = '';
+
+    let html = `<div class="kwsearch-replist">
+      <div class="kwrl-head">
+        <label class="kwrl-all"><input type="checkbox" class="kwrl-allcb" checked> 全选</label>
+        <button class="kwrl-cancel" title="返回搜索结果"><i class="fa-solid fa-arrow-left"></i> 返回</button>
+      </div>
+      <div class="kwrl-items">`;
+    targets.forEach((t, idx) => {
+        html += `<label class="kwrl-item">
+          <input type="checkbox" class="kwrl-cb" data-idx="${idx}" checked>
+          <span class="kwrl-body">
+            <span class="kwrl-meta"><span class="kwrl-src kwrl-src-${t.source}">${REPLACE_SRC_LABEL[t.source]}</span> <span class="kwrl-title">${esc(t.title)}</span> <span class="kwrl-cnt">×${t.count}</span></span>
+            <span class="kwrl-snip">${makeSnippet(t.text, query, opts)}</span>
+          </span>
+        </label>`;
+    });
+    html += `</div>
+      <button class="kwrl-go"><i class="fa-solid fa-right-left"></i> 替换所选（<span class="kwrl-n">${targets.length}</span>）</button>
+    </div>`;
+    box.innerHTML = html;
+
+    const allcb = box.querySelector('.kwrl-allcb');
+    const cbs = Array.from(box.querySelectorAll('.kwrl-cb'));
+    const nSpan = box.querySelector('.kwrl-n');
+    const upd = () => {
+        const n = cbs.filter(c => c.checked).length;
+        nSpan.textContent = n;
+        allcb.checked = n === cbs.length;
+        allcb.indeterminate = n > 0 && n < cbs.length;
+    };
+    allcb.addEventListener('change', () => { cbs.forEach(c => { c.checked = allcb.checked; }); upd(); });
+    cbs.forEach(c => c.addEventListener('change', upd));
+    box.querySelector('.kwrl-cancel').addEventListener('click', () => {
+        if (kwLastGroups) renderResults(panel, kwLastGroups, kwLastQuery);
+        else { box.innerHTML = ''; summary.innerHTML = ''; }
+    });
+    box.querySelector('.kwrl-go').addEventListener('click', async () => {
+        const chosen = cbs.filter(c => c.checked).map(c => targets[+c.dataset.idx]);
+        if (!chosen.length) { kwToast('请至少勾选一项', 'info'); return; }
+        // 实时读取「替换为」，随时改随时生效
+        const liveRepl = panel.querySelector('.kws-replace') ? panel.querySelector('.kws-replace').value : replacement;
+        const hits = chosen.reduce((a, t) => a + t.count, 0);
+        const msg = `将把「<b>${esc(query)}</b>」替换为「<b>${esc(liveRepl) || '（空，即删除该词）'}</b>」<br><br>`
+            + `所选 <b>${chosen.length}</b> 项，共 <b>${hits}</b> 处。<br><br>`
+            + `<b>会直接修改并保存，无法自动撤销，建议先备份。</b><br>确定替换？`;
+        const ok = await kwThemedConfirm(msg, [
+            { text: '取消', value: false },
+            { text: '替换所选', value: true, primary: true, danger: true },
+        ]);
+        if (!ok) return;
+        const r = await applyReplaceTargets(chosen, query, liveRepl, opts);
+        let tip = `已替换 ${r.done} 处`;
+        if (r.charSkipped) tip += `；角色卡 ${r.charSkipped} 处在未打开的高级定义里已跳过（先打开一次角色「高级定义」再替换）`;
+        kwToast(tip, r.charSkipped ? 'warning' : 'success');
+        doSearch(panel);
+    });
+    upd();
+}
+
 
 async function doSearch(panel) {
     if (kwSearching) return;
@@ -923,13 +1169,13 @@ async function switchPresetThenJump(jump) {
     try {
         const msg = `切换到预设「<b>${esc(jump.preset)}</b>」才能在编辑器中打开这条。<br><br>`
             + `当前预设「<b>${esc(curName || '未知')}</b>」<b>未保存的修改将会丢失</b>。要先保存吗？`;
-        choice = await c.callGenericPopup(msg, c.POPUP_TYPE.CONFIRM, '', {
-            okButton: '不保存，直接切换',
-            cancelButton: '取消',
-            customButtons: [{ text: '保存当前并切换', result: 2 }],
-        });
+        choice = await kwThemedConfirm(msg, [
+            { text: '取消', value: 0 },
+            { text: '不保存，直接切换', value: 1 },
+            { text: '保存当前并切换', value: 2, primary: true },
+        ]);
     } catch (e) { console.warn(`[${EXT_ID}] 预设切换确认弹窗失败`, e); return; }
-    if (!choice) return; // 0/null 取消
+    if (!choice) return; // 0/undefined 取消
     if (choice === 2) {
         try { await pm.updatePreset(); }
         catch (e) { console.warn(`[${EXT_ID}] 保存当前预设失败`, e); kwToast('保存当前预设失败，已取消切换', 'warning'); return; }
@@ -1052,6 +1298,13 @@ function buildPanel(prefill) {
     // 恢复上次搜索界面
     const last = getLastState();
     if (last) applyScopes(panel, last.scopes, last.opts);
+    // 若全局范围被勾选过，自动展开全局行
+    const gRow = panel.querySelector('.kwsearch-global');
+    const gToggle = panel.querySelector('.kws-more-scopes');
+    if (gRow && panel.querySelector('.kwsearch-global [data-scope]:checked')) {
+        gRow.hidden = false;
+        if (gToggle) gToggle.classList.add('on');
+    }
     if (prefill) {
         input.value = prefill;
     } else if (kwLastQuery) {
@@ -1082,6 +1335,26 @@ function buildPanel(prefill) {
     const help = panel.querySelector('.kws-help');
     const helpbox = panel.querySelector('.kwsearch-helpbox');
     help.addEventListener('click', () => { helpbox.hidden = !helpbox.hidden; });
+
+    // 查找替换
+    const repToggle = panel.querySelector('.kws-replace-toggle');
+    const repRow = panel.querySelector('.kwsearch-replace');
+    repToggle.addEventListener('click', () => {
+        repRow.hidden = !repRow.hidden;
+        repToggle.classList.toggle('on', !repRow.hidden);
+        if (!repRow.hidden) { const r = panel.querySelector('.kws-replace'); if (r) r.focus(); }
+    });
+    panel.querySelector('.kws-replace-go').addEventListener('click', () => startReplaceFlow(panel));
+
+    // 全局范围展开/收起
+    const moreScopes = panel.querySelector('.kws-more-scopes');
+    const globalRow = panel.querySelector('.kwsearch-global');
+    if (moreScopes && globalRow) {
+        moreScopes.addEventListener('click', () => {
+            globalRow.hidden = !globalRow.hidden;
+            moreScopes.classList.toggle('on', !globalRow.hidden);
+        });
+    }
 
     // 分类标签卡筛选
     panel.querySelector('.kwsearch-tabs').addEventListener('click', (e) => {
