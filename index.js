@@ -163,13 +163,19 @@ function characterToItems(ch, withJump) {
         ['system_prompt', '系统提示 system_prompt', d.system_prompt],
         ['post_history', '历史后指令 post_history', d.post_history_instructions],
     ];
-    return fields
+    const out = fields
         .filter(([, , v]) => v && `${v}`.trim())
         .map(([key, label, v]) => {
             const item = { title: `${ch.name} · ${label}`, content: `${v}` };
             if (withJump) item.jump = { type: 'char', field: key };
             return item;
         });
+    // 备用开场白（alternate greetings）
+    const alts = Array.isArray(d.alternate_greetings) ? d.alternate_greetings : [];
+    alts.forEach((g, i) => {
+        if (g && `${g}`.trim()) out.push({ title: `${ch.name} · 备用开场白 #${i + 1}`, content: `${g}` });
+    });
+    return out;
 }
 
 // 当前角色卡
@@ -617,35 +623,33 @@ function countMatches(text, query, opts) {
     catch (e) { return 0; }
 }
 
-// 角色卡可替换字段（保存依赖酒馆自身：写入文本框 + 触发 input）
+// 角色卡可替换字段（普通字段写文本框触发保存；备用开场白走 merge-attributes）
 function collectCharReplaceTargets(ch) {
     if (!ch) return [];
     const d = ch.data || {};
     const T = [];
-    const add = (selector, value, apply) => {
+    const addField = (label, selector, value, apply) => {
         if (value == null || value === '') return;
-        T.push({ selector, value: `${value}`, apply });
+        T.push({ kind: 'field', label, selector, value: `${value}`, apply });
     };
-    add('#description_textarea', ch.description != null ? ch.description : d.description, v => { ch.description = v; if (ch.data) ch.data.description = v; });
-    add('#firstmessage_textarea', ch.first_mes != null ? ch.first_mes : d.first_mes, v => { ch.first_mes = v; if (ch.data) ch.data.first_mes = v; });
-    add('#personality_textarea', ch.personality != null ? ch.personality : d.personality, v => { ch.personality = v; if (ch.data) ch.data.personality = v; });
-    add('#scenario_pole', ch.scenario != null ? ch.scenario : d.scenario, v => { ch.scenario = v; if (ch.data) ch.data.scenario = v; });
-    add('#mes_example_textarea', ch.mes_example != null ? ch.mes_example : d.mes_example, v => { ch.mes_example = v; if (ch.data) ch.data.mes_example = v; });
-    add('#creator_notes_textarea', d.creator_notes != null ? d.creator_notes : ch.creatorcomment, v => { if (ch.data) ch.data.creator_notes = v; ch.creatorcomment = v; });
-    add('#system_prompt_textarea', d.system_prompt, v => { if (ch.data) ch.data.system_prompt = v; });
+    addField('角色描述', '#description_textarea', ch.description != null ? ch.description : d.description, v => { ch.description = v; if (ch.data) ch.data.description = v; });
+    addField('开场白', '#firstmessage_textarea', ch.first_mes != null ? ch.first_mes : d.first_mes, v => { ch.first_mes = v; if (ch.data) ch.data.first_mes = v; });
+    addField('性格', '#personality_textarea', ch.personality != null ? ch.personality : d.personality, v => { ch.personality = v; if (ch.data) ch.data.personality = v; });
+    addField('场景', '#scenario_pole', ch.scenario != null ? ch.scenario : d.scenario, v => { ch.scenario = v; if (ch.data) ch.data.scenario = v; });
+    addField('对话示例', '#mes_example_textarea', ch.mes_example != null ? ch.mes_example : d.mes_example, v => { ch.mes_example = v; if (ch.data) ch.data.mes_example = v; });
+    addField('作者注释', '#creator_notes_textarea', d.creator_notes != null ? d.creator_notes : ch.creatorcomment, v => { if (ch.data) ch.data.creator_notes = v; ch.creatorcomment = v; });
+    addField('主提示词', '#system_prompt_textarea', d.system_prompt, v => { if (ch.data) ch.data.system_prompt = v; });
+    // 备用开场白
+    const alts = Array.isArray(d.alternate_greetings) ? d.alternate_greetings : [];
+    alts.forEach((g, i) => {
+        if (g == null || `${g}` === '') return;
+        T.push({
+            kind: 'altgreet', label: `备用开场白 #${i + 1}`, index: i, value: `${g}`,
+            apply: v => { if (ch.data && Array.isArray(ch.data.alternate_greetings)) ch.data.alternate_greetings[i] = v; },
+        });
+    });
     return T;
 }
-
-const CHAR_FIELD_LABEL = {
-    '#description_textarea': '角色描述',
-    '#firstmessage_textarea': '开场白',
-    '#personality_textarea': '性格',
-    '#scenario_pole': '场景',
-    '#mes_example_textarea': '对话示例',
-    '#creator_notes_textarea': '作者注释',
-    '#system_prompt_textarea': '主提示词',
-};
-const REPLACE_SRC_LABEL = { preset: '预设', chat: '聊天', char: '角色卡' };
 
 // 取第一处匹配的高亮片段
 function makeSnippet(text, query, opts) {
@@ -689,6 +693,8 @@ function kwThemedConfirm(htmlBody, buttons) {
 }
 
 // 收集可替换目标（每个预设条目 / 每条消息 / 每个角色卡字段为一项）
+const REPLACE_SRC_LABEL = { preset: '预设', chat: '聊天', char: '角色卡' };
+
 function buildReplaceTargets(query, opts, scopes) {
     const c = ctx();
     const targets = [];
@@ -710,7 +716,7 @@ function buildReplaceTargets(query, opts, scopes) {
         const ch = (c.characters || [])[c.characterId];
         if (ch) collectCharReplaceTargets(ch).forEach(t => {
             const cnt = countMatches(t.value, query, opts);
-            if (cnt) targets.push({ source: 'char', key: t.selector, title: CHAR_FIELD_LABEL[t.selector] || t.selector, count: cnt, text: t.value, _apply: t.apply, _selector: t.selector });
+            if (cnt) targets.push({ source: 'char', key: t.label, title: t.label, count: cnt, text: t.value, _t: t });
         });
     }
     return targets;
@@ -719,7 +725,7 @@ function buildReplaceTargets(query, opts, scopes) {
 // 执行替换（按来源分组保存）
 async function applyReplaceTargets(chosen, query, replacement, opts) {
     const c = ctx();
-    let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false;
+    let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false, altDirty = false;
     for (const t of chosen) {
         if (t.source === 'preset') {
             const p = getPresetPrompts().find(x => x.identifier === t.key);
@@ -739,15 +745,23 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
                 }
             }
         } else if (t.source === 'char') {
-            const cnt = countMatches(t.text, query, opts);
-            const el = document.querySelector(t._selector);
-            if (!el) { charSkipped += cnt; continue; }
-            const nv = `${t.text}`.replace(buildRegex(query, opts), replacement);
-            if (typeof t._apply === 'function') t._apply(nv);
-            el.value = nv;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            done += cnt;
+            const ct = t._t;
+            const cnt = countMatches(ct.value, query, opts);
+            if (!cnt) continue;
+            const nv = `${ct.value}`.replace(buildRegex(query, opts), replacement);
+            if (ct.kind === 'altgreet') {
+                if (typeof ct.apply === 'function') ct.apply(nv);
+                altDirty = true;
+                done += cnt;
+            } else {
+                const el = document.querySelector(ct.selector);
+                if (!el) { charSkipped += cnt; continue; }
+                if (typeof ct.apply === 'function') ct.apply(nv);
+                el.value = nv;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                done += cnt;
+            }
         }
     }
     if (presetDirty) {
@@ -757,6 +771,18 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
         try { const oai = await import('/scripts/openai.js'); if (oai && oai.promptManager && typeof oai.promptManager.render === 'function') oai.promptManager.render(); } catch (e) { /* ignore */ }
     }
     if (chatDirty) { try { if (typeof c.saveChat === 'function') await c.saveChat(); } catch (e) { console.warn(`[${EXT_ID}] 保存聊天失败`, e); } }
+    if (altDirty) {
+        const ch = (c.characters || [])[c.characterId];
+        try {
+            const headers = typeof c.getRequestHeaders === 'function' ? c.getRequestHeaders() : {};
+            const arr = (ch && ch.data && Array.isArray(ch.data.alternate_greetings)) ? ch.data.alternate_greetings : [];
+            const resp = await fetch('/api/characters/merge-attributes', {
+                method: 'POST', headers,
+                body: JSON.stringify({ avatar: ch.avatar, data: { alternate_greetings: arr } }),
+            });
+            if (!resp.ok) console.warn(`[${EXT_ID}] 保存备用开场白失败`, resp.status);
+        } catch (e) { console.warn(`[${EXT_ID}] 保存备用开场白出错`, e); }
+    }
     return { done, charSkipped };
 }
 
