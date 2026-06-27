@@ -1070,11 +1070,33 @@ function findPresetItem(identifier) {
 }
 
 async function jumpPreset(identifier, name) {
-    // 首选：直接拿到 openai.js 的 promptManager 实例，程序化打开编辑框
-    // （不依赖列表是否渲染、抽屉是否打开）
+    // 取 promptManager 实例（用于校验该条目是否在当前预设中）
+    let pm = null;
+    try { const mod = await import('/scripts/openai.js'); pm = mod && mod.promptManager; } catch (e) { /* ignore */ }
+
+    // 守卫：条目已不在当前预设（多半是搜索后切换了预设、点了缓存结果）
+    if (pm && typeof pm.getPromptById === 'function' && !pm.getPromptById(identifier)) {
+        kwToast(`「${name || identifier}」已不在当前预设里（可能预设已切换），请重新搜索后再跳转`, 'warning');
+        return;
+    }
+
+    // 首选：复刻手动操作——打开「AI 响应配置」抽屉 → 找到条目 → 点它的「编辑」铅笔
+    // （走原生 handleEdit，内容一定会被正确载入，不会空白）
+    let item = findPresetItem(identifier);
+    if (!item) {
+        const icon = document.getElementById('leftNavDrawerIcon');
+        if (icon && icon.classList.contains('closedIcon')) icon.click();
+        item = await waitFor(() => findPresetItem(identifier), 4000);
+    }
+    if (item) {
+        item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        flash(item);
+        const edit = item.querySelector('.prompt-manager-edit-action');
+        if (edit) { edit.click(); return; }
+    }
+
+    // 兜底：程序化加载编辑表单
     try {
-        const mod = await import('/scripts/openai.js');
-        const pm = mod && mod.promptManager;
         if (pm && typeof pm.getPromptById === 'function') {
             const prompt = pm.getPromptById(identifier);
             if (prompt) {
@@ -1086,26 +1108,10 @@ async function jumpPreset(identifier, name) {
             }
         }
     } catch (e) {
-        console.warn(`[${EXT_ID}] 直接调用 promptManager 失败，改用 DOM 方式`, e);
+        console.warn(`[${EXT_ID}] 程序化打开预设条目失败`, e);
     }
 
-    // 兜底：找列表条目点编辑按钮
-    let item = findPresetItem(identifier);
-    if (!item) {
-        const icon = document.getElementById('leftNavDrawerIcon');
-        if (icon && icon.classList.contains('closedIcon')) icon.click();
-        item = await waitFor(() => findPresetItem(identifier), 4000);
-    }
-    if (!item) {
-        const list = document.getElementById('completion_prompt_manager_list');
-        console.warn(`[${EXT_ID}] 未找到预设条目`, { identifier, listExists: !!list, itemCount: list ? list.querySelectorAll('[data-pm-identifier]').length : 0 });
-        kwToast(`请在「AI 响应配置 → 提示词管理器」中查看：${name || identifier}`, 'info');
-        return;
-    }
-    item.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    flash(item);
-    const action = item.querySelector('.prompt-manager-edit-action') || item.querySelector('.prompt-manager-inspect-action');
-    if (action) action.click();
+    kwToast(`请在「AI 响应配置 → 提示词管理器」中查看：${name || identifier}`, 'info');
 }
 
 // 把文本里的匹配高亮（转义安全）
