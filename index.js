@@ -410,8 +410,9 @@ async function runSearch(query, scopes, opts, onProgress) {
     const groups = [];
     if (scopes.preset) {
         const items = getPresetPrompts()
-            .filter(p => !p.marker && p.content)
-            .map(p => ({ title: p.name || p.identifier || '(未命名条目)', content: `${p.content}`, jump: { type: 'preset', identifier: p.identifier, name: p.name } }));
+            .map((p, i) => ({ p, i }))
+            .filter(({ p }) => p && !p.marker && p.content)
+            .map(({ p, i }) => ({ title: p.name || p.identifier || '(未命名条目)', content: `${p.content}`, jump: { type: 'preset', identifier: p.identifier, name: p.name, idx: i } }));
         groups.push({ label: '当前预设', icon: 'fa-sliders', cat: 'preset', ...scan(items, query, opts) });
     }
     if (scopes.world) {
@@ -506,7 +507,7 @@ const PANEL_HTML = `
   <div class="kwsearch-replace" hidden>
     <input type="text" class="kws-replace" placeholder="替换为…（留空＝删除该词）" />
     <button class="kws-replace-go"><i class="fa-solid fa-list-check"></i> 查找可替换项</button>
-    <div class="kws-replace-hint"><i class="fa-solid fa-triangle-exclamation"></i> 替换只作用于已勾选的「当前预设 / 当前聊天 / 当前角色卡」，会直接改并保存数据，建议先备份。</div>
+    <div class="kws-replace-hint"><i class="fa-solid fa-triangle-exclamation"></i> 替换只作用于已勾选的「当前预设 / 世界书 / 当前聊天 / 当前角色卡」，会直接改并保存数据，建议先备份。</div>
   </div>
   <div class="kwsearch-summary"></div>
   <div class="kwsearch-tabs"></div>
@@ -693,9 +694,9 @@ function kwThemedConfirm(htmlBody, buttons) {
 }
 
 // 收集可替换目标（每个预设条目 / 每条消息 / 每个角色卡字段为一项）
-const REPLACE_SRC_LABEL = { preset: '预设', chat: '聊天', char: '角色卡' };
+const REPLACE_SRC_LABEL = { preset: '预设', wi: '世界书', chat: '聊天', char: '角色卡' };
 
-function buildReplaceTargets(query, opts, scopes) {
+async function buildReplaceTargets(query, opts, scopes) {
     const c = ctx();
     const targets = [];
     if (scopes.preset) {
@@ -703,6 +704,13 @@ function buildReplaceTargets(query, opts, scopes) {
             if (!p || p.marker || !p.content) return;
             const cnt = countMatches(p.content, query, opts);
             if (cnt) targets.push({ source: 'preset', key: p.identifier, title: p.name || p.identifier || '(未命名条目)', count: cnt, text: `${p.content}` });
+        });
+    }
+    if (scopes.world) {
+        const items = await getWorldInfoEntries();
+        items.forEach(it => {
+            const cnt = countMatches(it.content, query, opts);
+            if (cnt) targets.push({ source: 'wi', book: it.jump.book, uid: it.jump.uid, title: it.title, count: cnt, text: `${it.content}` });
         });
     }
     if (scopes.chat) {
@@ -726,6 +734,7 @@ function buildReplaceTargets(query, opts, scopes) {
 async function applyReplaceTargets(chosen, query, replacement, opts) {
     const c = ctx();
     let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false, altDirty = false;
+    const worldEdits = {};
     for (const t of chosen) {
         if (t.source === 'preset') {
             const p = getPresetPrompts().find(x => x.identifier === t.key);
@@ -744,6 +753,9 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
                     if (typeof c.updateMessageBlock === 'function') { try { c.updateMessageBlock(t.key, m); } catch (e) { /* ignore */ } }
                 }
             }
+        } else if (t.source === 'wi') {
+            if (!worldEdits[t.book]) worldEdits[t.book] = [];
+            worldEdits[t.book].push(t.uid);
         } else if (t.source === 'char') {
             const ct = t._t;
             const cnt = countMatches(ct.value, query, opts);
@@ -783,11 +795,32 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
             if (!resp.ok) console.warn(`[${EXT_ID}] 保存备用开场白失败`, resp.status);
         } catch (e) { console.warn(`[${EXT_ID}] 保存备用开场白出错`, e); }
     }
+    // 世界书：逐本加载 → 替换选中条目 → 保存
+    const books = Object.keys(worldEdits);
+    if (books.length) {
+        const loader = c.loadWorldInfo || (typeof window !== 'undefined' && window.loadWorldInfo);
+        const saver = c.saveWorldInfo || (typeof window !== 'undefined' && window.saveWorldInfo);
+        for (const book of books) {
+            try {
+                if (!loader || !saver) { console.warn(`[${EXT_ID}] 缺少 loadWorldInfo/saveWorldInfo，无法保存世界书`); break; }
+                const data = await loader(book);
+                const entries = (data && data.entries) ? data.entries : {};
+                let changed = false;
+                for (const uid of worldEdits[book]) {
+                    const e = entries[uid];
+                    if (!e || typeof e.content !== 'string') continue;
+                    const cnt = countMatches(e.content, query, opts);
+                    if (cnt) { e.content = e.content.replace(buildRegex(query, opts), replacement); done += cnt; changed = true; }
+                }
+                if (changed) await saver(book, data, true);
+            } catch (e) { console.warn(`[${EXT_ID}] 保存世界书失败: ${book}`, e); }
+        }
+    }
     return { done, charSkipped };
 }
 
 // 点「查找可替换项」：收集目标并渲染勾选列表
-function startReplaceFlow(panel) {
+async function startReplaceFlow(panel) {
     if (kwSearching) return;
     const query = panel.querySelector('.kws-input').value.trim();
     if (!query) { kwToast('请先在上方输入要替换的关键词', 'warning'); return; }
@@ -798,11 +831,16 @@ function startReplaceFlow(panel) {
     };
     const scopes = {};
     panel.querySelectorAll('[data-scope]').forEach(cb => { scopes[cb.dataset.scope] = cb.checked; });
-    if (!scopes.preset && !scopes.chat && !scopes.char) {
-        kwToast('替换只支持「当前预设 / 当前聊天 / 当前角色卡」，请先勾选其中至少一个', 'info');
+    if (!scopes.preset && !scopes.world && !scopes.chat && !scopes.char) {
+        kwToast('替换只支持「当前预设 / 世界书 / 当前聊天 / 当前角色卡」，请先勾选其中至少一个', 'info');
         return;
     }
-    const targets = buildReplaceTargets(query, opts, scopes);
+    const btn = panel.querySelector('.kws-replace-go');
+    if (btn) btn.disabled = true;
+    let targets = [];
+    try { targets = await buildReplaceTargets(query, opts, scopes); }
+    catch (e) { console.warn(`[${EXT_ID}] 收集替换目标失败`, e); }
+    finally { if (btn) btn.disabled = false; }
     if (!targets.length) { kwToast('这些范围里没有可替换的匹配', 'info'); return; }
     panel._kwReplaceTargets = targets;
     panel._kwReplaceCtx = { query, replacement, opts };
@@ -991,7 +1029,7 @@ async function doJump(jump) {
         case 'chat': return jumpChat(jump.mesid);
         case 'chatfile': return jumpChatFile(jump.file, jump.mesid);
         case 'wi': return jumpWorldInfo(jump.book, jump.uid);
-        case 'preset': return jumpPreset(jump.identifier, jump.name);
+        case 'preset': return jumpPreset(jump.identifier, jump.name, jump.idx);
         case 'presetAll': return jumpPresetGlobal(jump);
         case 'char': return jumpChar(jump.field);
     }
@@ -1069,48 +1107,57 @@ function findPresetItem(identifier) {
         .find(el => el.getAttribute('data-pm-identifier') === identifier) || null;
 }
 
-async function jumpPreset(identifier, name) {
-    // 取 promptManager 实例（用于校验该条目是否在当前预设中）
-    let pm = null;
-    try { const mod = await import('/scripts/openai.js'); pm = mod && mod.promptManager; } catch (e) { /* ignore */ }
+async function jumpPreset(identifier, name, idx) {
+    const prompts = getPresetPrompts();
 
-    // 守卫：条目已不在当前预设（多半是搜索后切换了预设、点了缓存结果）
-    if (pm && typeof pm.getPromptById === 'function' && !pm.getPromptById(identifier)) {
-        kwToast(`「${name || identifier}」已不在当前预设里（可能预设已切换），请重新搜索后再跳转`, 'warning');
-        return;
+    // 解析「搜索时真正命中的那条」——处理 identifier 重复/为空、内容为空的情况
+    let target = null;
+    // 1) 优先按下标精确定位（同一预设、未重排时最准）
+    if (typeof idx === 'number' && prompts[idx] && (prompts[idx].identifier === identifier || identifier == null)) {
+        target = prompts[idx];
+    }
+    // 2) 按 identifier 解析；重名时优先「内容包含上次关键词」的那条，其次内容非空
+    if (!target) {
+        const cands = prompts.filter(p => p && p.identifier === identifier);
+        if (!cands.length) {
+            kwToast(`「${name || identifier}」已不在当前预设里（可能预设已切换），请重新搜索后再跳转`, 'warning');
+            return;
+        }
+        let re = null;
+        try { if (kwLastQuery) re = buildRegex(kwLastQuery, kwLastOpts); } catch (e) { re = null; }
+        target = (re && cands.find(p => p.content && (re.lastIndex = 0, re.test(`${p.content}`))))
+            || cands.find(p => p.content)
+            || cands[0];
     }
 
-    // 首选：复刻手动操作——打开「AI 响应配置」抽屉 → 找到条目 → 点它的「编辑」铅笔
-    // （走原生 handleEdit，内容一定会被正确载入，不会空白）
-    let item = findPresetItem(identifier);
-    if (!item) {
-        const icon = document.getElementById('leftNavDrawerIcon');
-        if (icon && icon.classList.contains('closedIcon')) icon.click();
-        item = await waitFor(() => findPresetItem(identifier), 4000);
+    // 确保提示词管理器已渲染（编辑表单元素存在）
+    const icon = document.getElementById('leftNavDrawerIcon');
+    if (icon && icon.classList.contains('closedIcon')) icon.click();
+    await waitFor(() => document.getElementById('completion_prompt_manager_list'), 4000);
+
+    const item = findPresetItem(target.identifier || identifier);
+    if (item) { item.scrollIntoView({ behavior: 'smooth', block: 'center' }); flash(item); }
+
+    // 用「命中的具体条目对象」程序化载入编辑表单：即使 identifier 重复，也能显示正确内容
+    try {
+        const mod = await import('/scripts/openai.js');
+        const pm = mod && mod.promptManager;
+        if (pm && typeof pm.loadPromptIntoEditForm === 'function') {
+            if (typeof pm.clearEditForm === 'function') pm.clearEditForm();
+            if (typeof pm.clearInspectForm === 'function') pm.clearInspectForm();
+            pm.loadPromptIntoEditForm(target);
+            pm.showPopup();
+            return;
+        }
+    } catch (e) {
+        console.warn(`[${EXT_ID}] 打开预设编辑表单失败`, e);
     }
+
+    // 兜底：点列表项的编辑铅笔
     if (item) {
-        item.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        flash(item);
         const edit = item.querySelector('.prompt-manager-edit-action');
         if (edit) { edit.click(); return; }
     }
-
-    // 兜底：程序化加载编辑表单
-    try {
-        if (pm && typeof pm.getPromptById === 'function') {
-            const prompt = pm.getPromptById(identifier);
-            if (prompt) {
-                if (typeof pm.clearEditForm === 'function') pm.clearEditForm();
-                if (typeof pm.clearInspectForm === 'function') pm.clearInspectForm();
-                pm.loadPromptIntoEditForm(prompt);
-                pm.showPopup();
-                return;
-            }
-        }
-    } catch (e) {
-        console.warn(`[${EXT_ID}] 程序化打开预设条目失败`, e);
-    }
-
     kwToast(`请在「AI 响应配置 → 提示词管理器」中查看：${name || identifier}`, 'info');
 }
 
