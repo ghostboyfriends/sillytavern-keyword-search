@@ -696,6 +696,51 @@ function kwThemedConfirm(htmlBody, buttons) {
 // 收集可替换目标（每个预设条目 / 每条消息 / 每个角色卡字段为一项）
 const REPLACE_SRC_LABEL = { preset: '预设', wi: '世界书', chat: '聊天', char: '角色卡' };
 
+// 角色绑定的世界书可替换目标：命名书（saveWorldInfo）+ 内嵌 character_book（merge-attributes）
+async function collectCharBoundWorldTargets(ch) {
+    const result = { wi: [], charbook: [] };
+    if (!ch) return result;
+    const c = ctx();
+    const d = ch.data || {};
+    const bookNames = new Set();
+    if (d.extensions && d.extensions.world) bookNames.add(d.extensions.world);
+    try {
+        const wiMod = await import('/scripts/world-info.js');
+        const fileName = `${ch.avatar || ''}`.replace(/\.[^.]+$/, '');
+        const lore = (wiMod && wiMod.world_info && Array.isArray(wiMod.world_info.charLore))
+            ? wiMod.world_info.charLore.find(x => x.name === fileName) : null;
+        if (lore && Array.isArray(lore.extraBooks)) lore.extraBooks.forEach(n => bookNames.add(n));
+    } catch (e) { /* ignore */ }
+    const loader = c.loadWorldInfo || (typeof window !== 'undefined' && window.loadWorldInfo);
+    if (loader) {
+        for (const name of bookNames) {
+            try {
+                const data = await loader(name);
+                const entries = (data && data.entries) ? data.entries : {};
+                for (const uid of Object.keys(entries)) {
+                    const e = entries[uid];
+                    const keys = [].concat(e.key || [], e.keysecondary || []);
+                    const title = e.comment || (keys.length ? keys.join(', ') : `#${uid}`);
+                    result.wi.push({ book: name, uid, value: `${e.content || ''}`, title: `${name} · ${title}` });
+                }
+            } catch (e) { /* ignore */ }
+        }
+    }
+    const emb = d.character_book && d.character_book.entries;
+    if (emb) {
+        const isArr = Array.isArray(emb);
+        const keys = isArr ? emb.map((_, i) => i) : Object.keys(emb);
+        for (const k of keys) {
+            const e = emb[k];
+            if (!e) continue;
+            const kk = [].concat(e.keys || e.key || []);
+            const title = e.comment || (kk.length ? kk.join(', ') : `内嵌#${k}`);
+            result.charbook.push({ key: k, value: `${e.content || ''}`, title: `内嵌 · ${title}` });
+        }
+    }
+    return result;
+}
+
 async function buildReplaceTargets(query, opts, scopes) {
     const c = ctx();
     const targets = [];
@@ -722,18 +767,38 @@ async function buildReplaceTargets(query, opts, scopes) {
     }
     if (scopes.char) {
         const ch = (c.characters || [])[c.characterId];
-        if (ch) collectCharReplaceTargets(ch).forEach(t => {
-            const cnt = countMatches(t.value, query, opts);
-            if (cnt) targets.push({ source: 'char', key: t.label, title: t.label, count: cnt, text: t.value, _t: t });
-        });
+        if (ch) {
+            collectCharReplaceTargets(ch).forEach(t => {
+                const cnt = countMatches(t.value, query, opts);
+                if (cnt) targets.push({ source: 'char', key: t.label, title: t.label, count: cnt, text: t.value, _t: t });
+            });
+            // 角色绑定的世界书（命名书 + 内嵌 character_book）
+            const bound = await collectCharBoundWorldTargets(ch);
+            bound.wi.forEach(w => {
+                const cnt = countMatches(w.value, query, opts);
+                if (cnt) targets.push({ source: 'wi', book: w.book, uid: w.uid, title: w.title, count: cnt, text: w.value });
+            });
+            bound.charbook.forEach(b => {
+                const cnt = countMatches(b.value, query, opts);
+                if (cnt) targets.push({ source: 'charbook', cbkey: b.key, title: b.title, count: cnt, text: b.value });
+            });
+        }
     }
-    return targets;
+    // 去重 wi（世界书范围与角色绑定书可能重叠）
+    const seen = new Set();
+    return targets.filter(t => {
+        if (t.source !== 'wi') return true;
+        const k = `${t.book}\u0000${t.uid}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+    });
 }
 
 // 执行替换（按来源分组保存）
 async function applyReplaceTargets(chosen, query, replacement, opts) {
     const c = ctx();
-    let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false, altDirty = false;
+    let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false, altDirty = false, charbookDirty = false;
     const worldEdits = {};
     for (const t of chosen) {
         if (t.source === 'preset') {
@@ -756,6 +821,14 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
         } else if (t.source === 'wi') {
             if (!worldEdits[t.book]) worldEdits[t.book] = [];
             worldEdits[t.book].push(t.uid);
+        } else if (t.source === 'charbook') {
+            const ch = (c.characters || [])[c.characterId];
+            const emb = ch && ch.data && ch.data.character_book && ch.data.character_book.entries;
+            const e = emb ? emb[t.cbkey] : null;
+            if (e && typeof e.content === 'string') {
+                const cnt = countMatches(e.content, query, opts);
+                if (cnt) { e.content = e.content.replace(buildRegex(query, opts), replacement); done += cnt; charbookDirty = true; }
+            }
         } else if (t.source === 'char') {
             const ct = t._t;
             const cnt = countMatches(ct.value, query, opts);
@@ -794,6 +867,17 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
             });
             if (!resp.ok) console.warn(`[${EXT_ID}] 保存备用开场白失败`, resp.status);
         } catch (e) { console.warn(`[${EXT_ID}] 保存备用开场白出错`, e); }
+    }
+    if (charbookDirty) {
+        const ch = (c.characters || [])[c.characterId];
+        try {
+            const headers = typeof c.getRequestHeaders === 'function' ? c.getRequestHeaders() : {};
+            const resp = await fetch('/api/characters/merge-attributes', {
+                method: 'POST', headers,
+                body: JSON.stringify({ avatar: ch.avatar, data: { character_book: ch.data.character_book } }),
+            });
+            if (!resp.ok) console.warn(`[${EXT_ID}] 保存内嵌世界书失败`, resp.status);
+        } catch (e) { console.warn(`[${EXT_ID}] 保存内嵌世界书出错`, e); }
     }
     // 世界书：逐本加载 → 替换选中条目 → 保存
     const books = Object.keys(worldEdits);
