@@ -124,8 +124,7 @@ function getAllPresetItems() {
 // 全部世界书条目（遍历所有 lorebook）
 async function getWorldInfoEntries() {
     const c = ctx();
-    const names = (typeof c.getWorldInfoNames === 'function' ? c.getWorldInfoNames() : null)
-        || c.world_names || (typeof window !== 'undefined' && window.world_names) || [];
+    const names = getAllWorldNames();
     const loader = c.loadWorldInfo || (typeof window !== 'undefined' && window.loadWorldInfo);
     const out = [];
     if (!loader || !names.length) {
@@ -133,20 +132,48 @@ async function getWorldInfoEntries() {
         return out;
     }
     for (const name of names) {
-        try {
-            const data = await loader(name);
-            const entries = (data && data.entries) ? data.entries : {};
-            for (const uid of Object.keys(entries)) {
-                const e = entries[uid];
-                const keys = [].concat(e.key || [], e.keysecondary || []);
-                const title = e.comment || (keys.length ? keys.join(', ') : `#${uid}`);
-                out.push({ title: `${name} · ${title}`, content: `${e.content || ''}`, jump: { type: 'wi', book: name, uid } });
-            }
-        } catch (err) {
-            console.warn(`[${EXT_ID}] 世界书读取失败: ${name}`, err);
-        }
+        const items = await getWorldInfoEntriesForBook(name);
+        out.push(...items);
     }
     return out;
+}
+
+function getAllWorldNames() {
+    const c = ctx();
+    return (typeof c.getWorldInfoNames === 'function' ? c.getWorldInfoNames() : null)
+        || c.world_names || (typeof window !== 'undefined' && window.world_names) || [];
+}
+
+// 读取单本世界书的条目
+async function getWorldInfoEntriesForBook(name) {
+    const c = ctx();
+    const loader = c.loadWorldInfo || (typeof window !== 'undefined' && window.loadWorldInfo);
+    const out = [];
+    if (!loader || !name) return out;
+    try {
+        const data = await loader(name);
+        const entries = (data && data.entries) ? data.entries : {};
+        for (const uid of Object.keys(entries)) {
+            const e = entries[uid];
+            const keys = [].concat(e.key || [], e.keysecondary || []);
+            const title = e.comment || (keys.length ? keys.join(', ') : `#${uid}`);
+            out.push({ title: `${name} · ${title}`, content: `${e.content || ''}`, jump: { type: 'wi', book: name, uid } });
+        }
+    } catch (err) {
+        console.warn(`[${EXT_ID}] 世界书读取失败: ${name}`, err);
+    }
+    return out;
+}
+
+// 世界书编辑器里当前打开的书名（用作「指定世界书」的默认选项）
+function getCurrentWorldBookName() {
+    const sel = document.getElementById('world_editor_select');
+    if (sel && sel.selectedIndex >= 0) {
+        const opt = sel.options[sel.selectedIndex];
+        const txt = opt ? `${opt.textContent}`.trim() : '';
+        if (txt && !/^-{2,}|请选择|^none$/i.test(txt)) return txt;
+    }
+    return null;
 }
 
 // 把一个角色对象拆成可搜索的字段。withJump=true 时附带跳转信息（仅当前角色用）
@@ -420,6 +447,11 @@ async function runSearch(query, scopes, opts, onProgress) {
         const items = await getWorldInfoEntries();
         groups.push({ label: '世界书', icon: 'fa-book', cat: 'wi', ...scan(items, query, opts) });
     }
+    if (scopes.worldOne && scopes.worldOneBook) {
+        onProgress && onProgress('读取指定世界书…');
+        const items = await getWorldInfoEntriesForBook(scopes.worldOneBook);
+        groups.push({ label: `指定世界书：${scopes.worldOneBook}`, icon: 'fa-book-bookmark', cat: 'wi', ...scan(items, query, opts) });
+    }
     if (scopes.char) {
         const cc = ctx();
         const ch = (cc.characters || [])[cc.characterId];
@@ -486,9 +518,14 @@ const PANEL_HTML = `
   <div class="kwsearch-scopes">
     <label><input type="checkbox" data-scope="preset" checked> 当前预设</label>
     <label><input type="checkbox" data-scope="world" checked> 世界书</label>
+    <label><input type="checkbox" data-scope="worldOne"> 指定世界书</label>
     <label><input type="checkbox" data-scope="char"> 当前角色卡</label>
     <label><input type="checkbox" data-scope="chat"> 当前聊天</label>
     <button class="kws-more-scopes" title="全局范围（需扫描磁盘，较慢）">全局 <i class="fa-solid fa-chevron-down"></i></button>
+  </div>
+  <div class="kwsearch-worldpick" hidden>
+    <i class="fa-solid fa-book"></i>
+    <select class="kws-world-pick"></select>
   </div>
   <div class="kwsearch-scopes kwsearch-global" hidden>
     <label><input type="checkbox" data-scope="presetAll"> 全部预设</label>
@@ -758,6 +795,13 @@ async function buildReplaceTargets(query, opts, scopes) {
             if (cnt) targets.push({ source: 'wi', book: it.jump.book, uid: it.jump.uid, title: it.title, count: cnt, text: `${it.content}` });
         });
     }
+    if (scopes.worldOne && scopes.worldOneBook) {
+        const items = await getWorldInfoEntriesForBook(scopes.worldOneBook);
+        items.forEach(it => {
+            const cnt = countMatches(it.content, query, opts);
+            if (cnt) targets.push({ source: 'wi', book: it.jump.book, uid: it.jump.uid, title: it.title, count: cnt, text: `${it.content}` });
+        });
+    }
     if (scopes.chat) {
         (c.chat || []).forEach((m, i) => {
             if (!m || typeof m.mes !== 'string') return;
@@ -915,8 +959,9 @@ async function startReplaceFlow(panel) {
     };
     const scopes = {};
     panel.querySelectorAll('[data-scope]').forEach(cb => { scopes[cb.dataset.scope] = cb.checked; });
-    if (!scopes.preset && !scopes.world && !scopes.chat && !scopes.char) {
-        kwToast('替换只支持「当前预设 / 世界书 / 当前聊天 / 当前角色卡」，请先勾选其中至少一个', 'info');
+    scopes.worldOneBook = panel.querySelector('.kws-world-pick') ? panel.querySelector('.kws-world-pick').value : '';
+    if (!scopes.preset && !scopes.world && !(scopes.worldOne && scopes.worldOneBook) && !scopes.chat && !scopes.char) {
+        kwToast('替换只支持「当前预设 / 世界书 / 指定世界书 / 当前聊天 / 当前角色卡」，请先勾选其中至少一个', 'info');
         return;
     }
     const btn = panel.querySelector('.kws-replace-go');
@@ -1006,6 +1051,7 @@ async function doSearch(panel) {
 
     const scopes = {};
     panel.querySelectorAll('[data-scope]').forEach(cb => { scopes[cb.dataset.scope] = cb.checked; });
+    scopes.worldOneBook = panel.querySelector('.kws-world-pick') ? panel.querySelector('.kws-world-pick').value : '';
     const opts = {
         caseSensitive: panel.querySelector('.kws-case').checked,
         regex: panel.querySelector('.kws-regex').checked,
@@ -1517,6 +1563,28 @@ function buildPanel(prefill) {
             globalRow.hidden = !globalRow.hidden;
             moreScopes.classList.toggle('on', !globalRow.hidden);
         });
+    }
+
+    // 指定世界书：勾选后显示下拉、填充书名
+    const worldOneCb = panel.querySelector('[data-scope="worldOne"]');
+    const worldPickRow = panel.querySelector('.kwsearch-worldpick');
+    const worldPick = panel.querySelector('.kws-world-pick');
+    const populateWorldPick = () => {
+        if (!worldPick) return;
+        const names = getAllWorldNames();
+        const prev = worldPick.value;
+        worldPick.innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+        const cur = getCurrentWorldBookName();
+        if (prev && names.includes(prev)) worldPick.value = prev;
+        else if (cur && names.includes(cur)) worldPick.value = cur;
+    };
+    if (worldOneCb && worldPickRow) {
+        const syncWorldPick = () => {
+            worldPickRow.hidden = !worldOneCb.checked;
+            if (worldOneCb.checked) populateWorldPick();
+        };
+        worldOneCb.addEventListener('change', syncWorldPick);
+        syncWorldPick();
     }
 
     // 分类标签卡筛选

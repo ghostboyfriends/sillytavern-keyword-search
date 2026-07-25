@@ -75,6 +75,12 @@
 .kws-more-scopes i{font-size:11px;transition:transform .2s}
 .kws-more-scopes.on{color:var(--accent);border-style:solid;border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .kws-more-scopes.on i{transform:rotate(180deg)}
+.kwsearch-worldpick{display:flex;align-items:center;gap:8px;color:var(--muted)}
+.kwsearch-worldpick[hidden]{display:none}
+.kwsearch-worldpick i{font-size:13px;color:var(--accent)}
+.kws-world-pick{flex:1;min-width:0;max-width:100%;box-sizing:border-box;padding:8px 12px;font-size:13px;color:var(--ink);border-radius:11px;border:1px solid var(--line);background:var(--inputBg);outline:none;cursor:pointer}
+.kws-world-pick:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 26%,transparent)}
+.kws-world-pick option{color:initial}
 
 /* ===== 正则说明 ? ===== */
 .kws-help{width:19px;height:19px;border-radius:50%;border:1px solid var(--line);background:color-mix(in srgb,var(--ink) 8%,transparent);color:var(--ink);font-size:12px;font-weight:600;cursor:pointer;line-height:1;display:inline-flex;align-items:center;justify-content:center;margin-left:-3px}
