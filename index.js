@@ -1,10 +1,15 @@
-/* 关键词搜索 Keyword Search for SillyTavern  v1.1.0
+import { createPresetStore, replaceText } from "./safe-data.js";
+import { createRegexStore, REGEX_SCOPES } from "./regex-data.js";
+
+/* 关键词搜索 Keyword Search for SillyTavern
  * 搜索范围：当前预设 / 世界书 / 当前角色卡 / 当前聊天 / 全部角色卡 / 全部聊天
  * 数据访问统一走 SillyTavern.getContext()，跨版本相对稳定。
  */
 
 const EXT_ID = 'keyword-search';
 const ctx = () => SillyTavern.getContext();
+const presetStore = createPresetStore({ getContext: ctx });
+const regexStore = createRegexStore({ getContext: ctx, presetStore });
 
 /* ============================================================
  * 持久化存储（历史记录 / 上次搜索状态，存进酒馆扩展设置）
@@ -442,6 +447,11 @@ async function runSearch(query, scopes, opts, onProgress) {
             .map(({ p, i }) => ({ title: p.name || p.identifier || '(未命名条目)', content: `${p.content}`, jump: { type: 'preset', identifier: p.identifier, name: p.name, idx: i } }));
         groups.push({ label: '当前预设', icon: 'fa-sliders', cat: 'preset', ...scan(items, query, opts) });
     }
+    const regexGroups = await regexStore.collect(scopes);
+    for (const group of regexGroups) {
+        const items = group.items.map(target => ({ title: target.title + (target.disabled ? ' · 已停用' : ''), content: target.text, jump: { type: 'regexReplacement', target } }));
+        groups.push({ label: `${group.label} · ${group.ownerLabel} · 替换为`, icon: group.icon, cat: 'regex', ...scan(items, query, opts) });
+    }
     if (scopes.world) {
         onProgress && onProgress('读取世界书…');
         const items = await getWorldInfoEntries();
@@ -521,8 +531,18 @@ const PANEL_HTML = `
     <label><input type="checkbox" data-scope="worldOne"> 指定世界书</label>
     <label><input type="checkbox" data-scope="char"> 当前角色卡</label>
     <label><input type="checkbox" data-scope="chat"> 当前聊天</label>
+    <button type="button" class="kws-more-regex" aria-expanded="false" title="搜索正则脚本的替换为内容"><i class="fa-solid fa-code"></i> 正则脚本 <i class="fa-solid fa-chevron-down"></i></button>
     <button class="kws-more-scopes" title="全局范围（需扫描磁盘，较慢）">全局 <i class="fa-solid fa-chevron-down"></i></button>
   </div>
+  <section class="kwsearch-regex-scopes" hidden aria-label="正则脚本搜索范围">
+    <div class="kwregex-heading"><span><i class="fa-solid fa-code"></i> 正则脚本</span><span class="kwregex-caption">仅搜索「替换为」内容</span></div>
+    <div class="kwregex-options">
+      <label class="kwregex-option" data-region="global"><input type="checkbox" data-scope="regexGlobal"><span class="kwregex-icon"><i class="fa-solid fa-globe"></i></span><span><b>全局</b><small>全局脚本</small></span></label>
+      <label class="kwregex-option" data-region="preset"><input type="checkbox" data-scope="regexPreset"><span class="kwregex-icon"><i class="fa-solid fa-sliders"></i></span><span><b>预设</b><small>当前预设绑定</small></span></label>
+      <label class="kwregex-option" data-region="character"><input type="checkbox" data-scope="regexCharacter"><span class="kwregex-icon"><i class="fa-solid fa-user"></i></span><span><b>角色卡</b><small>当前角色绑定</small></span></label>
+    </div>
+    <p class="kwregex-note"><i class="fa-solid fa-shield-halved"></i> 三类来源独立保存，不改查找表达式、开关或执行顺序。已停用脚本也可搜索。</p>
+  </section>
   <div class="kwsearch-worldpick" hidden>
     <i class="fa-solid fa-book"></i>
     <select class="kws-world-pick"></select>
@@ -544,7 +564,7 @@ const PANEL_HTML = `
   <div class="kwsearch-replace" hidden>
     <input type="text" class="kws-replace" placeholder="替换为…（留空＝删除该词）" />
     <button class="kws-replace-go"><i class="fa-solid fa-list-check"></i> 查找可替换项</button>
-    <div class="kws-replace-hint"><i class="fa-solid fa-triangle-exclamation"></i> 替换只作用于已勾选的「当前预设 / 世界书 / 当前聊天 / 当前角色卡」，会直接改并保存数据，建议先备份。</div>
+    <div class="kws-replace-hint"><i class="fa-solid fa-triangle-exclamation"></i> 只修改勾选范围中的所选项。正则脚本仅修改「替换为」字段；保存前可备份原文。</div>
   </div>
   <div class="kwsearch-summary"></div>
   <div class="kwsearch-tabs"></div>
@@ -587,7 +607,7 @@ function applyTheme(panel, key) {
     }
 }
 
-const KW_CATS = [['preset', '预设条目'], ['char', '角色卡'], ['wi', '世界书'], ['chat', '聊天记录']];
+const KW_CATS = [['preset', '预设条目'], ['char', '角色卡'], ['wi', '世界书'], ['chat', '聊天记录'], ['regex', '正则替换内容']];
 
 function applyTab(panel, cat) {
     panel.querySelectorAll('.kwsearch-group').forEach(g => {
@@ -703,35 +723,46 @@ function makeSnippet(text, query, opts) {
 }
 
 // 主题化确认框（玻璃面板，跟随主面板配色）。buttons: [{text, value, primary, danger}]
+let kwConfirmCounter = 0;
 function kwThemedConfirm(htmlBody, buttons) {
     const c = ctx();
     return new Promise((resolve) => {
         let settled = false;
-        const finish = (v) => { if (settled) return; settled = true; resolve(v); };
+        const token = String(++kwConfirmCounter);
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            document.removeEventListener('click', onClick);
+            resolve(value);
+        };
+        const onClick = (event) => {
+            const button = event.target.closest?.('.kwc-btn');
+            const wrap = button?.closest('.kwc-panel');
+            if (!wrap || wrap.dataset.confirmToken !== token) return;
+            const choice = buttons[Number(button.dataset.i)];
+            if (!choice) return;
+            event.preventDefault();
+            finish(choice.value);
+            const dialog = wrap.closest('dialog');
+            const close = dialog?.querySelector('.popup-button-ok, .popup-button-close');
+            if (close) close.click();
+        };
         const theme = esc(resolveTheme(getTheme()));
-        const btnHtml = buttons.map((b, i) => `<button class="kwc-btn${b.primary ? ' kwc-primary' : ''}${b.danger ? ' kwc-danger' : ''}" data-i="${i}">${esc(b.text)}</button>`).join('');
-        const html = `<div class="kwsearch-panel kwc-panel" data-theme="${theme}"><div class="kwsearch-glass"><div class="kwc-body">${htmlBody}</div><div class="kwc-actions">${btnHtml}</div></div></div>`;
+        const btnHtml = buttons.map((b, i) => `<button type="button" class="kwc-btn${b.primary ? ' kwc-primary' : ''}${b.danger ? ' kwc-danger' : ''}" data-i="${i}">${esc(b.text)}</button>`).join('');
+        const html = `<div class="kwsearch-panel kwc-panel" data-theme="${theme}" data-confirm-token="${token}"><div class="kwsearch-glass"><div class="kwc-body">${htmlBody}</div><div class="kwc-actions">${btnHtml}</div></div></div>`;
+        // Bind before showing the popup: an immediate click must not get lost,
+        // and a slowly mounted popup must not miss a one-shot 60ms timer.
+        document.addEventListener('click', onClick);
         try {
             Promise.resolve(c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', { allowVerticalScrolling: true, okButton: '确定' }))
                 .then(() => finish(undefined)).catch(() => finish(undefined));
-        } catch (e) { finish(undefined); return; }
-        setTimeout(() => {
-            const wrap = document.querySelector('.kwc-panel');
-            if (!wrap) return;
-            const closeDlg = () => {
-                const dlg = wrap.closest('dialog');
-                const b = dlg && (dlg.querySelector('.popup-button-ok') || dlg.querySelector('.popup-button-close'));
-                if (b) b.click();
-            };
-            wrap.querySelectorAll('.kwc-btn').forEach((btn) => {
-                btn.addEventListener('click', () => { finish(buttons[+btn.dataset.i].value); closeDlg(); }, { once: true });
-            });
-        }, 60);
+        } catch (error) { finish(undefined); }
     });
 }
 
 // 收集可替换目标（每个预设条目 / 每条消息 / 每个角色卡字段为一项）
-const REPLACE_SRC_LABEL = { preset: '预设', wi: '世界书', chat: '聊天', char: '角色卡' };
+const REPLACE_SRC_LABEL = { preset: '预设', wi: '世界书', chat: '聊天', char: '角色卡', charbook: '角色内嵌世界书', regex: '正则' };
+const REGEX_SRC_LABEL = { global: '全局正则', preset: '预设正则', character: '角色卡正则' };
 
 // 角色绑定的世界书可替换目标：命名书（saveWorldInfo）+ 内嵌 character_book（merge-attributes）
 async function collectCharBoundWorldTargets(ch) {
@@ -782,10 +813,11 @@ async function buildReplaceTargets(query, opts, scopes) {
     const c = ctx();
     const targets = [];
     if (scopes.preset) {
-        getPresetPrompts().forEach(p => {
+        const presetBinding = presetStore.capture();
+        getPresetPrompts().forEach((p, presetIndex) => {
             if (!p || p.marker || !p.content) return;
             const cnt = countMatches(p.content, query, opts);
-            if (cnt) targets.push({ source: 'preset', key: p.identifier, title: p.name || p.identifier || '(未命名条目)', count: cnt, text: `${p.content}` });
+            if (cnt) targets.push({ source: 'preset', key: p.identifier, presetIndex, presetBinding, title: p.name || p.identifier || '(未命名条目)', count: cnt, text: `${p.content}` });
         });
     }
     if (scopes.world) {
@@ -828,6 +860,12 @@ async function buildReplaceTargets(query, opts, scopes) {
             });
         }
     }
+    for (const group of await regexStore.collect(scopes)) {
+        for (const target of group.items) {
+            const count = countMatches(target.text, query, opts);
+            if (count) targets.push({ ...target, count });
+        }
+    }
     // 去重 wi（世界书范围与角色绑定书可能重叠）
     const seen = new Set();
     return targets.filter(t => {
@@ -844,13 +882,12 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
     const c = ctx();
     let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false, altDirty = false, charbookDirty = false;
     const worldEdits = {};
+    const safeResult = await regexStore.replaceTargets(chosen.filter(t => t.source === 'regex'), chosen.filter(t => t.source === 'preset'), query, replacement, opts);
+    done += safeResult.done;
+    presetDirty = safeResult.presetDirty;
     for (const t of chosen) {
-        if (t.source === 'preset') {
-            const p = getPresetPrompts().find(x => x.identifier === t.key);
-            if (p && p.content) {
-                const cnt = countMatches(p.content, query, opts);
-                if (cnt) { p.content = `${p.content}`.replace(buildRegex(query, opts), replacement); done += cnt; presetDirty = true; }
-            }
+        if (t.source === 'preset' || t.source === 'regex') {
+            continue; // Already staged and safely saved above.
         } else if (t.source === 'chat') {
             const m = (c.chat || [])[t.key];
             if (m && typeof m.mes === 'string') {
@@ -894,9 +931,6 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
         }
     }
     if (presetDirty) {
-        try { if (typeof c.saveSettingsDebounced === 'function') c.saveSettingsDebounced(); } catch (e) { /* ignore */ }
-        const pm = getOpenAIPresetManager();
-        try { if (pm && typeof pm.updatePreset === 'function') await pm.updatePreset(); } catch (e) { console.warn(`[${EXT_ID}] 保存当前预设失败`, e); }
         try { const oai = await import('/scripts/openai.js'); if (oai && oai.promptManager && typeof oai.promptManager.render === 'function') oai.promptManager.render(); } catch (e) { /* ignore */ }
     }
     if (chatDirty) { try { if (typeof c.saveChat === 'function') await c.saveChat(); } catch (e) { console.warn(`[${EXT_ID}] 保存聊天失败`, e); } }
@@ -960,15 +994,16 @@ async function startReplaceFlow(panel) {
     const scopes = {};
     panel.querySelectorAll('[data-scope]').forEach(cb => { scopes[cb.dataset.scope] = cb.checked; });
     scopes.worldOneBook = panel.querySelector('.kws-world-pick') ? panel.querySelector('.kws-world-pick').value : '';
-    if (!scopes.preset && !scopes.world && !(scopes.worldOne && scopes.worldOneBook) && !scopes.chat && !scopes.char) {
-        kwToast('替换只支持「当前预设 / 世界书 / 指定世界书 / 当前聊天 / 当前角色卡」，请先勾选其中至少一个', 'info');
+    if (!scopes.preset && !scopes.world && !(scopes.worldOne && scopes.worldOneBook) && !scopes.chat && !scopes.char && !REGEX_SCOPES.some(s => scopes[s.key])) {
+        kwToast('请先勾选当前数据范围或正则脚本范围', 'info');
         return;
     }
+    try { buildRegex(query, opts); } catch (error) { kwToast('正则表达式无效：' + error.message, 'warning'); return; }
     const btn = panel.querySelector('.kws-replace-go');
     if (btn) btn.disabled = true;
     let targets = [];
     try { targets = await buildReplaceTargets(query, opts, scopes); }
-    catch (e) { console.warn(`[${EXT_ID}] 收集替换目标失败`, e); }
+    catch (e) { console.warn(`[${EXT_ID}] 收集替换目标失败`, e); kwToast(e.message || '收集替换目标失败', 'warning'); return; }
     finally { if (btn) btn.disabled = false; }
     if (!targets.length) { kwToast('这些范围里没有可替换的匹配', 'info'); return; }
     panel._kwReplaceTargets = targets;
@@ -988,15 +1023,20 @@ function renderReplaceList(panel, targets) {
     let html = `<div class="kwsearch-replist">
       <div class="kwrl-head">
         <label class="kwrl-all"><input type="checkbox" class="kwrl-allcb" checked> 全选</label>
+        <button type="button" class="kwrl-backup" title="下载所选目标的原始内容备份"><i class="fa-solid fa-download"></i> 备份原文</button>
         <button class="kwrl-cancel" title="返回搜索结果"><i class="fa-solid fa-arrow-left"></i> 返回</button>
       </div>
       <div class="kwrl-items">`;
     targets.forEach((t, idx) => {
-        html += `<label class="kwrl-item">
+        const sourceLabel = t.source === 'regex' ? REGEX_SRC_LABEL[t.regexScope] : REPLACE_SRC_LABEL[t.source];
+        const owner = t.source === 'regex' ? `<span class="kwrl-owner">${esc(t.ownerLabel)}${t.disabled ? ' · 已停用' : ''}</span>` : '';
+        html += `<label class="kwrl-item" ${t.source === 'regex' ? `data-regex-region="${t.regexScope}"` : ''}>
           <input type="checkbox" class="kwrl-cb" data-idx="${idx}" checked>
           <span class="kwrl-body">
-            <span class="kwrl-meta"><span class="kwrl-src kwrl-src-${t.source}">${REPLACE_SRC_LABEL[t.source]}</span> <span class="kwrl-title">${esc(t.title)}</span> <span class="kwrl-cnt">×${t.count}</span></span>
-            <span class="kwrl-snip">${makeSnippet(t.text, query, opts)}</span>
+            <span class="kwrl-meta"><span class="kwrl-src kwrl-src-${t.source}">${sourceLabel}</span> <span class="kwrl-title">${esc(t.title)}</span> <span class="kwrl-cnt">×${t.count}</span></span>
+            ${owner}
+            <span class="kwrl-snip">${t.source === 'regex' ? '<span class="kwrl-preview-label">原内容</span>' : ''}${makeSnippet(t.text, query, opts)}</span>
+            ${t.source === 'regex' ? `<span class="kwrl-after"><span class="kwrl-preview-label">替换后</span><span data-preview-idx="${idx}"></span></span>` : ''}
           </span>
         </label>`;
     });
@@ -1020,25 +1060,72 @@ function renderReplaceList(panel, targets) {
         if (kwLastGroups) renderResults(panel, kwLastGroups, kwLastQuery);
         else { box.innerHTML = ''; summary.innerHTML = ''; }
     });
+    const replacementInput = panel.querySelector('.kws-replace');
+    const updatePreviews = () => {
+        const value = replacementInput ? replacementInput.value : replacement;
+        box.querySelectorAll('[data-preview-idx]').forEach(element => {
+            const target = targets[Number(element.dataset.previewIdx)];
+            try {
+                const next = replaceText(target.text, query, value, opts).value;
+                const match = buildRegex(query, opts).exec(target.text);
+                const start = Math.max(0, (match?.index || 0) - 30);
+                const end = Math.min(next.length, start + 340);
+                element.textContent = next ? (start ? '…' : '') + next.slice(start, end) + (end < next.length ? '…' : '') : '（替换后为空）';
+            } catch (error) { element.textContent = error.message; }
+        });
+    };
+    if (panel._kwPreviewInput && panel._kwPreviewHandler) panel._kwPreviewInput.removeEventListener('input', panel._kwPreviewHandler);
+    panel._kwPreviewInput = replacementInput;
+    panel._kwPreviewHandler = updatePreviews;
+    replacementInput?.addEventListener('input', updatePreviews);
+    updatePreviews();
+    box.querySelector('.kwrl-backup').addEventListener('click', () => {
+        const selected = cbs.filter(cb => cb.checked).map(cb => targets[Number(cb.dataset.idx)]);
+        if (!selected.length) { kwToast('请先勾选需要备份的目标', 'info'); return; }
+        const data = { format: 'keyword-search-original-content', version: 1, createdAt: new Date().toISOString(), items: selected.map(target => ({
+            source: target.source, region: target.regexScope, owner: target.ownerLabel || target.presetBinding?.name,
+            key: target.key, title: target.title, text: target.text, script: target.originalScript,
+        })) };
+        const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+        const link = document.createElement('a');
+        link.href = url; link.download = 'keyword-search-original-content-' + Date.now() + '.json';
+        document.body.appendChild(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
     box.querySelector('.kwrl-go').addEventListener('click', async () => {
+        if (panel._kwReplacing) return;
         const chosen = cbs.filter(c => c.checked).map(c => targets[+c.dataset.idx]);
         if (!chosen.length) { kwToast('请至少勾选一项', 'info'); return; }
-        // 实时读取「替换为」，随时改随时生效
-        const liveRepl = panel.querySelector('.kws-replace') ? panel.querySelector('.kws-replace').value : replacement;
+        if (panel.querySelector('.kws-input').value.trim() !== query ||
+            panel.querySelector('.kws-case').checked !== opts.caseSensitive || panel.querySelector('.kws-regex').checked !== opts.regex) {
+            kwToast('查找内容或匹配模式已变化，请重新查找可替换项。', 'warning'); return;
+        }
+        const liveRepl = replacementInput ? replacementInput.value : replacement;
         const hits = chosen.reduce((a, t) => a + t.count, 0);
+        const regions = [...new Set(chosen.map(t => t.source === 'regex' ? REGEX_SRC_LABEL[t.regexScope] : REPLACE_SRC_LABEL[t.source]))];
         const msg = `将把「<b>${esc(query)}</b>」替换为「<b>${esc(liveRepl) || '（空，即删除该词）'}</b>」<br><br>`
-            + `所选 <b>${chosen.length}</b> 项，共 <b>${hits}</b> 处。<br><br>`
-            + `<b>会直接修改并保存，无法自动撤销，建议先备份。</b><br>确定替换？`;
-        const ok = await kwThemedConfirm(msg, [
-            { text: '取消', value: false },
-            { text: '替换所选', value: true, primary: true, danger: true },
-        ]);
-        if (!ok) return;
-        const r = await applyReplaceTargets(chosen, query, liveRepl, opts);
-        let tip = `已替换 ${r.done} 处`;
-        if (r.charSkipped) tip += `；角色卡 ${r.charSkipped} 处在未打开的高级定义里已跳过（先打开一次角色「高级定义」再替换）`;
-        kwToast(tip, r.charSkipped ? 'warning' : 'success');
-        doSearch(panel);
+            + `来源：<b>${regions.map(esc).join(' / ')}</b><br>所选 <b>${chosen.length}</b> 项，共 <b>${hits}</b> 处。<br><br>`
+            + `<b>会直接修改并保存，无法自动撤销，建议先备份原文。</b><br>正则脚本仅修改「替换为」字段。确定替换？`;
+        const button = box.querySelector('.kwrl-go');
+        panel._kwReplacing = true; button.disabled = true;
+        try {
+            const ok = await kwThemedConfirm(msg, [
+                { text: '取消', value: false },
+                { text: '替换所选', value: true, primary: true, danger: true },
+            ]);
+            if (!ok) return;
+            const r = await applyReplaceTargets(chosen, query, liveRepl, opts);
+            let tip = `已替换 ${r.done} 处`;
+            if (r.charSkipped) tip += `；角色卡 ${r.charSkipped} 处在未打开的高级定义里已跳过（先打开一次角色「高级定义」再替换）`;
+            kwToast(tip, r.charSkipped ? 'warning' : 'success');
+            doSearch(panel);
+        } catch (e) {
+            console.warn(`[${EXT_ID}] 替换保存失败`, e);
+            const partial = e.completed ? `已有 ${e.completed} 处完成保存；其余来源未全部保存。` : '';
+            kwToast(partial + (e.message || '替换保存失败，请保留预览并重新查找。'), 'warning');
+        } finally {
+            panel._kwReplacing = false; button.disabled = false;
+        }
     });
     upd();
 }
@@ -1161,6 +1248,7 @@ async function doJump(jump) {
         case 'wi': return jumpWorldInfo(jump.book, jump.uid);
         case 'preset': return jumpPreset(jump.identifier, jump.name, jump.idx);
         case 'presetAll': return jumpPresetGlobal(jump);
+        case 'regexReplacement': return showRegexReplacementViewer(jump.target);
         case 'char': return jumpChar(jump.field);
     }
 }
@@ -1386,13 +1474,13 @@ async function switchPresetThenJump(jump) {
     } catch (e) { console.warn(`[${EXT_ID}] 预设切换确认弹窗失败`, e); return; }
     if (!choice) return; // 0/undefined 取消
     if (choice === 2) {
-        try { await pm.updatePreset(); }
+        try { await presetStore.saveCurrent(); }
         catch (e) { console.warn(`[${EXT_ID}] 保存当前预设失败`, e); kwToast('保存当前预设失败，已取消切换', 'warning'); return; }
     }
     try {
         const val = pm.findPreset(jump.preset);
         if (val === undefined || val === null) { kwToast('未找到目标预设', 'warning'); return; }
-        pm.selectPreset(val);
+        await pm.selectPreset(val);
     } catch (e) { console.warn(`[${EXT_ID}] 切换预设失败`, e); kwToast('切换预设失败', 'warning'); return; }
     await waitFor(() => (typeof pm.getSelectedPresetName === 'function' && pm.getSelectedPresetName() === jump.preset), 6000);
     await new Promise(r => setTimeout(r, 300));
@@ -1475,6 +1563,14 @@ async function jumpChar(field) {
     locateInField(el, kwLastQuery, kwLastOpts);
 }
 
+async function showRegexReplacementViewer(target) {
+    try {
+        const script = regexStore.readTarget(target);
+        const title = `${REGEX_SRC_LABEL[target.regexScope]} · ${target.ownerLabel} · ${target.title}`;
+        await kwThemedConfirm(`<div class="kwregex-view-title">${esc(title)}</div><pre class="kwregex-view-content">${esc(script.replaceString) || '（空内容）'}</pre><small>只读查看。请在搜索面板中使用「查找可替换项」批量修改。</small>`, [{ text: '关闭', value: false }]);
+    } catch (error) { kwToast(error.message || '正则来源已变化，请重新搜索。', 'warning'); }
+}
+
 function buildPanel(prefill) {
     const tmp = document.createElement('div');
     tmp.innerHTML = PANEL_HTML.trim();
@@ -1514,6 +1610,24 @@ function buildPanel(prefill) {
         gRow.hidden = false;
         if (gToggle) gToggle.classList.add('on');
     }
+    const regexRow = panel.querySelector('.kwsearch-regex-scopes');
+    const regexToggle = panel.querySelector('.kws-more-regex');
+    const syncRegexToggle = () => {
+        regexToggle.classList.toggle('on', !regexRow.hidden);
+        regexToggle.setAttribute('aria-expanded', String(!regexRow.hidden));
+    };
+    if (regexRow.querySelector('[data-scope]:checked')) regexRow.hidden = false;
+    regexToggle.addEventListener('click', () => { regexRow.hidden = !regexRow.hidden; syncRegexToggle(); });
+    syncRegexToggle();
+    regexStore.availability().then(available => {
+        for (const definition of REGEX_SCOPES) {
+            const cb = regexRow.querySelector(`[data-scope="${definition.key}"]`);
+            if (!available[definition.key]) {
+                cb.checked = false; cb.disabled = true;
+                cb.closest('label').title = '此酒馆版本缺少该来源的安全读写接口';
+            }
+        }
+    }).catch(() => {});
     if (prefill) {
         input.value = prefill;
     } else if (kwLastQuery) {
